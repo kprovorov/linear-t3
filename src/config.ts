@@ -39,8 +39,14 @@ const LinearSettings = z.object({
 // Which Linear issues go to one T3 project, and how their threads are started.
 const ProjectSettings = z.object({
   linear: LinearSettings,
-  workspace: WorkspaceStrategy.default({ type: "worktree", baseRef: "main", startFromOrigin: true }),
-  runtimeMode: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]).default("full-access"),
+  workspace: WorkspaceStrategy.default({
+    type: "worktree",
+    baseRef: "main",
+    startFromOrigin: true,
+  }),
+  runtimeMode: z
+    .enum(["approval-required", "auto-accept-edits", "auto", "full-access"])
+    .default("full-access"),
   interactionMode: z.enum(["default", "plan"]).default("default"),
   // Defaults to the T3 project's default model.
   model: ModelSelection.optional(),
@@ -63,7 +69,9 @@ const Config = z.object({
     })
     .prefault({}),
   // Keyed by T3 project id, title, or workspace root path.
-  projects: z.record(z.string(), ProjectSettings).refine((p) => Object.keys(p).length > 0, "Define at least one project"),
+  projects: z
+    .record(z.string(), ProjectSettings)
+    .refine((p) => Object.keys(p).length > 0, "Define at least one project"),
 });
 
 export type Config = z.infer<typeof Config>;

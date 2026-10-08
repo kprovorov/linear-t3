@@ -41,7 +41,8 @@ export class StateStore {
   }
 
   async record(issueId: string, record: LaunchRecord): Promise<void> {
-    if (record.pendingActions && Object.keys(record.pendingActions).length === 0) delete record.pendingActions;
+    if (record.pendingActions && Object.keys(record.pendingActions).length === 0)
+      delete record.pendingActions;
     this.launched[issueId] = record;
     await this.save();
   }

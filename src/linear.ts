@@ -7,7 +7,11 @@ export async function listIssues(
   filter: LinearDocument.IssueFilter,
   signal: AbortSignal,
 ): Promise<Issue[]> {
-  const issues = await client.issues({ filter, first: 50, orderBy: LinearDocument.PaginationOrderBy.CreatedAt });
+  const issues = await client.issues({
+    filter,
+    first: 50,
+    orderBy: LinearDocument.PaginationOrderBy.CreatedAt,
+  });
   // fetchNext() appends the next page to `nodes`.
   while (issues.pageInfo.hasNextPage) {
     signal.throwIfAborted();
@@ -20,7 +24,12 @@ export async function listIssues(
  * Creates a comment with a caller-chosen id. Retrying with the same id never duplicates it:
  * if the create fails, it checks whether a comment with that id already exists.
  */
-export async function createCommentOnce(client: LinearClient, id: string, issueId: string, body: string): Promise<void> {
+export async function createCommentOnce(
+  client: LinearClient,
+  id: string,
+  issueId: string,
+  body: string,
+): Promise<void> {
   try {
     const { success } = await client.createComment({ id, issueId, body });
     if (!success) throw new Error("Linear did not create the comment");
@@ -32,7 +41,11 @@ export async function createCommentOnce(client: LinearClient, id: string, issueI
 
 const stateIdsByTeam = new Map<string, Map<string, string>>();
 
-export async function moveToState(client: LinearClient, issue: Issue, stateName: string): Promise<void> {
+export async function moveToState(
+  client: LinearClient,
+  issue: Issue,
+  stateName: string,
+): Promise<void> {
   const teamId = issue.teamId;
   if (!teamId) throw new Error(`Issue ${issue.identifier} has no team`);
   let states = stateIdsByTeam.get(teamId);
@@ -43,7 +56,10 @@ export async function moveToState(client: LinearClient, issue: Issue, stateName:
   }
   try {
     const stateId = states.get(stateName.toLowerCase());
-    if (!stateId) throw new Error(`Issue ${issue.identifier}'s team has no workflow state named "${stateName}"`);
+    if (!stateId)
+      throw new Error(
+        `Issue ${issue.identifier}'s team has no workflow state named "${stateName}"`,
+      );
     const { success } = await client.updateIssue(issue.id, { stateId });
     if (!success) throw new Error(`Linear did not apply the state change for ${issue.identifier}`);
   } catch (error) {

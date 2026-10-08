@@ -4,9 +4,6 @@
   "private": true,
   "description": "Daemon that polls Linear issues and launches T3 Code threads for them",
   "type": "module",
-  "engines": {
-    "node": ">=22.18"
-  },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/main.ts",
     "once": "node --env-file-if-exists=.env src/main.ts --once",
@@ -19,6 +16,13 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite-plus": "1.1.0"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0"
+  },
+  "engines": {
+    "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
   }
 }

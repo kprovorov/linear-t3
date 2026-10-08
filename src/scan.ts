@@ -43,8 +43,14 @@ export class ScanTracker {
   }
 
   /** Records a completed scan; `unlaunched` are the matching issues still without a thread. */
-  complete(projectRef: string, scan: { startedAt: number; full: boolean }, unlaunched: string[]): void {
-    const lastFullScan = scan.full ? scan.startedAt : (this.scans.get(projectRef)?.lastFullScan ?? scan.startedAt);
+  complete(
+    projectRef: string,
+    scan: { startedAt: number; full: boolean },
+    unlaunched: string[],
+  ): void {
+    const lastFullScan = scan.full
+      ? scan.startedAt
+      : (this.scans.get(projectRef)?.lastFullScan ?? scan.startedAt);
     this.scans.set(projectRef, { since: scan.startedAt, lastFullScan, carry: new Set(unlaunched) });
   }
 }

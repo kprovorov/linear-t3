@@ -3,7 +3,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { parseArgs } from "node:util";
-import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings } from "./config.ts";
+import {
+  DEFAULT_PROMPT,
+  loadConfig,
+  requireEnv,
+  type Config,
+  type ProjectSettings,
+} from "./config.ts";
 import { createCommentOnce, LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
 import { ScanTracker } from "./scan.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
@@ -42,7 +48,9 @@ function findProject(projects: T3Project[], ref: string): T3Project {
   if (byTitle.length === 1) return byTitle[0]!;
   if (byTitle.length > 1) {
     const roots = byTitle.map((p) => p.workspaceRoot).join(", ");
-    throw new Error(`Several T3 projects are titled "${ref}" (${roots}); use the id or workspace path instead`);
+    throw new Error(
+      `Several T3 projects are titled "${ref}" (${roots}); use the id or workspace path instead`,
+    );
   }
   const known = projects.map((p) => `"${p.title}" (${p.workspaceRoot})`).join(", ");
   throw new Error(`No T3 project matches "${ref}". Known projects: ${known}`);
@@ -70,11 +78,17 @@ class LaunchMayHaveStarted extends Error {
   }
 }
 
-async function recordOrStop(state: StateStore, issueId: string, record: LaunchRecord): Promise<void> {
+async function recordOrStop(
+  state: StateStore,
+  issueId: string,
+  record: LaunchRecord,
+): Promise<void> {
   try {
     await state.record(issueId, record);
   } catch (error) {
-    throw new StateWriteError(`${record.identifier}: could not record thread ${record.threadId}: ${(error as Error).message}`);
+    throw new StateWriteError(
+      `${record.identifier}: could not record thread ${record.threadId}: ${(error as Error).message}`,
+    );
   }
 }
 
@@ -93,22 +107,26 @@ async function launchIssue(
   const { config, t3, linear, state } = ctx;
   const modelSelection = settings.model ?? project.defaultModelSelection;
   if (!modelSelection) {
-    throw new Error(`No model configured for project "${projectRef}" and the T3 project has no default model`);
+    throw new Error(
+      `No model configured for project "${projectRef}" and the T3 project has no default model`,
+    );
   }
 
-  const { threadId, resumed } = await t3.launchThread({
-    // Attempt 0 keeps the plain issue id; later attempts get a fresh thread id (see recordLaunchFailure).
-    idempotencyKey: attempt === 0 ? issue.id : `${issue.id}:${attempt}`,
-    projectId: project.id,
-    title: `${issue.identifier}: ${issue.title}`,
-    modelSelection,
-    runtimeMode: settings.runtimeMode,
-    interactionMode: settings.interactionMode,
-    workspaceStrategy: workspaceFor(settings, issue),
-    message: renderPrompt(settings.promptTemplate ?? DEFAULT_PROMPT, issue),
-  }).catch((error: unknown) => {
-    throw error instanceof T3ThreadNotCreated ? error : new LaunchMayHaveStarted(error);
-  });
+  const { threadId, resumed } = await t3
+    .launchThread({
+      // Attempt 0 keeps the plain issue id; later attempts get a fresh thread id (see recordLaunchFailure).
+      idempotencyKey: attempt === 0 ? issue.id : `${issue.id}:${attempt}`,
+      projectId: project.id,
+      title: `${issue.identifier}: ${issue.title}`,
+      modelSelection,
+      runtimeMode: settings.runtimeMode,
+      interactionMode: settings.interactionMode,
+      workspaceStrategy: workspaceFor(settings, issue),
+      message: renderPrompt(settings.promptTemplate ?? DEFAULT_PROMPT, issue),
+    })
+    .catch((error: unknown) => {
+      throw error instanceof T3ThreadNotCreated ? error : new LaunchMayHaveStarted(error);
+    });
   // Record before touching Linear: a failed Linear update must never cause a duplicate thread.
   const { onLaunch } = settings.linear;
   const record: LaunchRecord = {
@@ -121,7 +139,9 @@ async function launchIssue(
     },
   };
   await recordOrStop(state, issue.id, record);
-  log(`${issue.identifier}: ${resumed ? "found existing" : "started"} T3 thread ${threadId} in "${project.title}"`);
+  log(
+    `${issue.identifier}: ${resumed ? "found existing" : "started"} T3 thread ${threadId} in "${project.title}"`,
+  );
   await runPendingActions(issue.id, record, { config, linear, state }, issue);
 }
 
@@ -141,7 +161,9 @@ async function runPendingActions(
       await createCommentOnce(linear, stableUuid(`${issueId}:comment`, 4), issueId, body);
       delete pendingActions.comment;
     } catch (error) {
-      log(`${record.identifier}: commenting on Linear failed, will retry: ${(error as Error).message}`);
+      log(
+        `${record.identifier}: commenting on Linear failed, will retry: ${(error as Error).message}`,
+      );
     }
   }
   if (pendingActions.moveToState) {
@@ -149,7 +171,9 @@ async function runPendingActions(
       await moveToState(linear, issue ?? (await linear.issue(issueId)), pendingActions.moveToState);
       delete pendingActions.moveToState;
     } catch (error) {
-      log(`${record.identifier}: moving Linear issue failed, will retry: ${(error as Error).message}`);
+      log(
+        `${record.identifier}: moving Linear issue failed, will retry: ${(error as Error).message}`,
+      );
     }
   }
   await recordOrStop(state, issueId, { ...record, pendingActions });
@@ -174,7 +198,13 @@ function recordLaunchFailure(issueId: string, error: unknown): void {
   launchFailures.set(issueId, { count, retryAt: Date.now() + delayMs, attempt });
 }
 
-async function poll(config: Config, linear: LinearClient, state: StateStore, t3Token: string, dryRun: boolean) {
+async function poll(
+  config: Config,
+  linear: LinearClient,
+  state: StateStore,
+  t3Token: string,
+  dryRun: boolean,
+) {
   if (!dryRun) {
     for (const [issueId, record] of state.withPendingActions()) {
       if (shutdown.signal.aborted) return;
@@ -188,12 +218,18 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
   try {
     const candidates = await collectCandidates(config, linear, state, scanned);
     if (candidates.length === 0) return;
-    log(`${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`);
+    log(
+      `${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`,
+    );
     if (dryRun || shutdown.signal.aborted) return;
     await launchCandidates(candidates, { config, linear, state, t3Token });
   } finally {
     for (const [projectRef, scan] of scanned) {
-      scans.complete(projectRef, scan, scan.issueIds.filter((id) => !state.has(id)));
+      scans.complete(
+        projectRef,
+        scan,
+        scan.issueIds.filter((id) => !state.has(id)),
+      );
     }
   }
 }
@@ -221,7 +257,9 @@ async function collectCandidates(
       // An issue matched by several projects gets a single thread, in the first matching project.
       const existing = pending.get(issue.id);
       if (existing) {
-        log(`${issue.identifier}: matches both "${existing.projectRef}" and "${projectRef}", using "${existing.projectRef}"`);
+        log(
+          `${issue.identifier}: matches both "${existing.projectRef}" and "${projectRef}", using "${existing.projectRef}"`,
+        );
         continue;
       }
       pending.set(issue.id, { issue, projectRef, settings });
@@ -252,7 +290,9 @@ async function launchCandidates(
     // Shutdown may arrive while reading projects; closing the socket ends that wait.
     const closeOnShutdown = () => t3.close();
     shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
-    const projects = await t3.listProjects().finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
+    const projects = await t3
+      .listProjects()
+      .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
     let launched = 0;
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
     for (const candidate of candidates) {
@@ -274,7 +314,6 @@ async function launchCandidates(
     t3.close();
   }
 }
-
 
 async function main() {
   const stop = (signal: string) => {
@@ -302,7 +341,9 @@ async function main() {
       if (args.once) process.exitCode = 1;
     }
     if (args.once || shutdown.signal.aborted) break;
-    await setTimeout(config.pollIntervalSeconds * 1000, undefined, { signal: shutdown.signal }).catch(() => {});
+    await setTimeout(config.pollIntervalSeconds * 1000, undefined, {
+      signal: shutdown.signal,
+    }).catch(() => {});
   }
 }
 
