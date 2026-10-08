@@ -62,7 +62,8 @@ export class T3ThreadNotCreated extends Error {}
 interface ShellSnapshot {
   projects: T3Project[];
   threads: { id: string }[];
-  archivedThreads: { id: string }[];
+  // Only in some T3 versions; archived threads also come from subscribeArchivedShell.
+  archivedThreads?: { id: string }[];
 }
 
 export class T3Client {
@@ -173,11 +174,11 @@ export class T3Client {
     this.send({ _tag: "Interrupt", requestId, interruptors: [] });
   }
 
-  /** Reads the first snapshot of the shell subscription, then stops it. */
-  private shellSnapshot(): Promise<ShellSnapshot> {
+  /** Reads the first snapshot of a shell subscription, then stops it. */
+  private shellSnapshot(tag = "orchestration.subscribeShell"): Promise<ShellSnapshot> {
     const requestId = String(this.nextId);
     return new Promise((resolve, reject) => {
-      this.call("orchestration.subscribeShell", {}, (values) => {
+      this.call(tag, {}, (values) => {
         for (const value of values as { kind: string; snapshot?: ShellSnapshot }[]) {
           if (value.kind === "snapshot" && value.snapshot) {
             this.interrupt(requestId);
@@ -193,10 +194,11 @@ export class T3Client {
     return (await this.shellSnapshot()).projects;
   }
 
-  /** Whether T3 has the thread, active or archived. Deleted threads are absent from the snapshot. */
+  /** Whether T3 has the thread, active or archived. Deleted threads are absent from both snapshots. */
   private async threadExists(threadId: string): Promise<boolean> {
-    const { threads, archivedThreads } = await this.shellSnapshot();
-    return [...threads, ...archivedThreads].some((t) => t.id === threadId);
+    const active = await this.shellSnapshot();
+    const archived = await this.shellSnapshot("orchestration.subscribeArchivedShell");
+    return [...active.threads, ...(active.archivedThreads ?? []), ...archived.threads].some((t) => t.id === threadId);
   }
 
   /**
