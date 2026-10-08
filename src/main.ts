@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { setTimeout } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings } from "./config.ts";
 import { LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
@@ -16,6 +17,9 @@ const { values: args } = parseArgs({
 });
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
+
+// Aborted on SIGTERM/SIGINT: the current launch finishes, nothing new starts.
+const shutdown = new AbortController();
 
 function renderPrompt(template: string, issue: Issue): string {
   const vars: Record<string, string> = {
@@ -142,18 +146,24 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
   }
 
   const now = Date.now();
-  const pending: Candidate[] = [];
+  const pending = new Map<string, Candidate>();
   for (const [projectRef, settings] of Object.entries(config.projects)) {
     const filter = { and: [{ team: { key: { eq: settings.linear.team } } }, settings.linear.filter ?? {}] };
     const issues = await listIssues(linear, filter);
     for (const issue of issues) {
       if (state.has(issue.id) || (launchFailures.get(issue.id)?.retryAt ?? 0) > now) continue;
-      pending.push({ issue, projectRef, settings });
+      // An issue matched by several projects gets a single thread, in the first matching project.
+      const existing = pending.get(issue.id);
+      if (existing) {
+        log(`${issue.identifier}: matches both "${existing.projectRef}" and "${projectRef}", using "${existing.projectRef}"`);
+        continue;
+      }
+      pending.set(issue.id, { issue, projectRef, settings });
     }
   }
-  if (pending.length === 0) return;
+  if (pending.size === 0) return;
 
-  log(`${pending.length} new issue(s): ${pending.map((p) => p.issue.identifier).join(", ")}`);
+  log(`${pending.size} new issue(s): ${[...pending.values()].map((p) => p.issue.identifier).join(", ")}`);
   if (dryRun) return;
 
   const t3 = await T3Client.connect(config.t3.url, t3Token);
@@ -161,8 +171,8 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
     const projects = await t3.listProjects();
     let launched = 0;
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
-    for (const candidate of pending) {
-      if (launched >= config.maxLaunchesPerPoll) break;
+    for (const candidate of pending.values()) {
+      if (launched >= config.maxLaunchesPerPoll || shutdown.signal.aborted) break;
       try {
         await launchIssue(candidate, findProject(projects, candidate.projectRef), { config, t3, linear, state });
         launchFailures.delete(candidate.issue.id);
@@ -178,36 +188,30 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
 }
 
 async function main() {
+  const stop = (signal: string) => {
+    log(`received ${signal}, shutting down`);
+    shutdown.abort();
+  };
+  process.on("SIGTERM", () => stop("SIGTERM"));
+  process.on("SIGINT", () => stop("SIGINT"));
+
   const config = await loadConfig(args.config);
   const linear = new LinearClient({ apiKey: requireEnv("LINEAR_API_KEY") });
   const t3Token = args["dry-run"] ? "" : requireEnv("T3_TOKEN");
   const state = new StateStore(config.stateFile);
   await state.load();
 
-  let stopping = false;
-  let wake: (() => void) | null = null;
-  const stop = (signal: string) => {
-    log(`received ${signal}, shutting down`);
-    stopping = true;
-    wake?.();
-  };
-  process.on("SIGTERM", () => stop("SIGTERM"));
-  process.on("SIGINT", () => stop("SIGINT"));
-
   const watching = Object.entries(config.projects).map(([ref, p]) => `${p.linear.team} -> ${ref}`);
   log(`watching ${watching.join(", ")}`);
-  while (!stopping) {
+  while (!shutdown.signal.aborted) {
     try {
       await poll(config, linear, state, t3Token, args["dry-run"]);
     } catch (error) {
       log(`poll failed: ${(error as Error).message}`);
       if (args.once) process.exitCode = 1;
     }
-    if (args.once) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, config.pollIntervalSeconds * 1000);
-      wake = () => (clearTimeout(timer), resolve());
-    });
+    if (args.once || shutdown.signal.aborted) break;
+    await setTimeout(config.pollIntervalSeconds * 1000, undefined, { signal: shutdown.signal }).catch(() => {});
   }
 }
 
