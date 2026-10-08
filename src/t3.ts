@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { ModelSelection } from "./config.ts";
 import { stableUuid } from "./uuid.ts";
 
@@ -223,12 +222,12 @@ export class T3Client {
 
   private async launch(threadId: string, input: LaunchThreadInput): Promise<{ threadId: string; resumed: boolean }> {
     const result = (await this.call("orchestration.launchThread", {
-      commandId: randomUUID(),
+      // T3 keeps a receipt per command id, so retrying with the same id after a lost response
+      // returns the thread the first attempt created instead of creating another.
+      // (Don't send reuseExistingThread: it means "start a run in an existing empty thread".)
+      commandId: stableUuid(`${input.idempotencyKey}:command`),
       creationSource: "server",
-      // Same scheme as the T3 web client: a pre-allocated thread id plus reuseExistingThread
-      // makes a retry after a lost response return the existing thread.
       threadId,
-      reuseExistingThread: true,
       projectId: input.projectId,
       title: input.title,
       modelSelection: input.modelSelection,
