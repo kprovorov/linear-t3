@@ -22,57 +22,104 @@ const WorkspaceStrategy = z.discriminatedUnion("type", [
   }),
 ]);
 
-const LinearSettings = z.object({
-  // Linear team key, e.g. "ENG".
-  team: z.string(),
-  // Linear `IssueFilter`, AND-ed with the team filter. Only matching issues get a thread.
-  filter: IssueFilter.optional(),
-  onLaunch: z
-    .object({
-      // Workflow state name to move the issue to once its thread is started.
-      moveToState: z.string().optional(),
-      comment: z.boolean().default(true),
-    })
-    .prefault({}),
+const OnLaunch = z.object({
+  // Workflow state name to move the issue to once its thread is started.
+  moveToState: z.string().optional(),
+  comment: z.boolean().optional(),
+});
+
+// How threads are started. Every field can be set in `defaults` and overridden per project.
+const ThreadSettings = z.object({
+  workspace: WorkspaceStrategy.optional(),
+  runtimeMode: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]).optional(),
+  interactionMode: z.enum(["default", "plan"]).optional(),
+  // Unset everywhere means the T3 project's default model.
+  model: ModelSelection.optional(),
+  promptTemplate: z.string().optional(),
+});
+
+// Settings shared by every project. A project's own value wins; nested objects (`workspace`, `model`,
+// `linear.filter`) are replaced as a whole, while `linear.onLaunch` is merged key by key.
+const Defaults = ThreadSettings.extend({
+  linear: z.object({ filter: IssueFilter.optional(), onLaunch: OnLaunch.optional() }).optional(),
 });
 
 // Which Linear issues go to one T3 project, and how their threads are started.
+const ProjectEntry = ThreadSettings.extend({
+  linear: z.object({
+    // Linear team key, e.g. "ENG".
+    team: z.string(),
+    // Linear `IssueFilter`, AND-ed with the team filter. Only matching issues get a thread.
+    filter: IssueFilter.optional(),
+    onLaunch: OnLaunch.optional(),
+  }),
+});
+
+// A project entry merged with `defaults`, with built-in defaults filling whatever is still unset.
 const ProjectSettings = z.object({
-  linear: LinearSettings,
+  linear: z.object({
+    team: z.string(),
+    filter: IssueFilter.optional(),
+    onLaunch: z
+      .object({ moveToState: z.string().optional(), comment: z.boolean().default(true) })
+      .prefault({}),
+  }),
   workspace: WorkspaceStrategy.default({
     type: "worktree",
     baseRef: "main",
     startFromOrigin: true,
   }),
-  runtimeMode: z
-    .enum(["approval-required", "auto-accept-edits", "auto", "full-access"])
-    .default("full-access"),
-  interactionMode: z.enum(["default", "plan"]).default("default"),
-  // Defaults to the T3 project's default model.
+  runtimeMode: ThreadSettings.shape.runtimeMode.unwrap().default("full-access"),
+  interactionMode: ThreadSettings.shape.interactionMode.unwrap().default("default"),
   model: ModelSelection.optional(),
   promptTemplate: z.string().optional(),
 });
 
-const Config = z.object({
-  pollIntervalSeconds: z.number().int().min(10).default(60),
-  // Caps how many threads are started per poll so a broad filter can't flood T3.
-  maxLaunchesPerPoll: z.number().int().min(1).default(5),
-  // Between full scans, polls only read recently updated issues. Full scans catch issues that start
-  // matching without being updated themselves (e.g. a referenced label or state is renamed).
-  fullScanIntervalMinutes: z.number().min(1).default(60),
-  stateFile: z.string().default("./state.json"),
-  t3: z
-    .object({
-      url: z.string().url().default("http://127.0.0.1:3773"),
-      // Optional public web URL, used to link the thread in the Linear comment.
-      webUrl: z.string().url().optional(),
-    })
-    .prefault({}),
-  // Keyed by T3 project id, title, or workspace root path.
-  projects: z
-    .record(z.string(), ProjectSettings)
-    .refine((p) => Object.keys(p).length > 0, "Define at least one project"),
-});
+const Config = z
+  .object({
+    pollIntervalSeconds: z.number().int().min(10).default(60),
+    // Caps how many threads are started per poll so a broad filter can't flood T3.
+    maxLaunchesPerPoll: z.number().int().min(1).default(5),
+    // Between full scans, polls only read recently updated issues. Full scans catch issues that start
+    // matching without being updated themselves (e.g. a referenced label or state is renamed).
+    fullScanIntervalMinutes: z.number().min(1).default(60),
+    stateFile: z.string().default("./state.json"),
+    t3: z
+      .object({
+        url: z.string().url().default("http://127.0.0.1:3773"),
+        // Optional public web URL, used to link the thread in the Linear comment.
+        webUrl: z.string().url().optional(),
+      })
+      .prefault({}),
+    defaults: Defaults.prefault({}),
+    // Keyed by T3 project id, title, or workspace root path.
+    projects: z
+      .record(z.string(), ProjectEntry)
+      .refine((p) => Object.keys(p).length > 0, "Define at least one project"),
+  })
+  .transform(({ defaults, projects, ...rest }) => ({
+    ...rest,
+    projects: Object.fromEntries(
+      Object.entries(projects).map(([ref, p]) => [ref, resolveProject(defaults, p)]),
+    ),
+  }));
+
+function resolveProject(
+  defaults: z.infer<typeof Defaults>,
+  project: z.infer<typeof ProjectEntry>,
+): ProjectSettings {
+  const { linear: sharedLinear, ...sharedThread } = defaults;
+  const { linear, ...thread } = project;
+  return ProjectSettings.parse({
+    ...sharedThread,
+    ...thread,
+    linear: {
+      team: linear.team,
+      filter: linear.filter ?? sharedLinear?.filter,
+      onLaunch: { ...sharedLinear?.onLaunch, ...linear.onLaunch },
+    },
+  });
+}
 
 export type Config = z.infer<typeof Config>;
 export type ProjectSettings = z.infer<typeof ProjectSettings>;

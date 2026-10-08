@@ -6,6 +6,15 @@
   "t3": {
     "url": "http://127.0.0.1:3773"
   },
+  "defaults": {
+    "linear": {
+      "onLaunch": { "comment": true, "moveToState": "In Progress" }
+    },
+    "workspace": { "type": "worktree", "baseRef": "main", "startFromOrigin": true },
+    "runtimeMode": "full-access",
+    "interactionMode": "default",
+    "promptTemplate": "Work on Linear issue {identifier}: {title}\n\n{url}\n\n{description}"
+  },
   "projects": {
     "/home/me/projects/my-app": {
       "linear": {
@@ -14,12 +23,8 @@
           "labels": { "some": { "name": { "eqIgnoreCase": "t3" } } },
           "state": { "type": { "in": ["unstarted"] } },
           "priority": { "lte": 2, "gt": 0 }
-        },
-        "onLaunch": { "comment": true, "moveToState": "In Progress" }
-      },
-      "workspace": { "type": "worktree", "baseRef": "main", "startFromOrigin": true },
-      "runtimeMode": "full-access",
-      "interactionMode": "default"
+        }
+      }
     },
     "infra": {
       "linear": {
