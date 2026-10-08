@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings } from "./config.ts";
-import { LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
+import { createCommentOnce, LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import { T3Client, type T3Project, type WorkspaceStrategy } from "./t3.ts";
+import { stableUuid } from "./uuid.ts";
 
 const { values: args } = parseArgs({
   options: {
@@ -61,6 +62,14 @@ async function threadLink(config: Config, threadId: string): Promise<string> {
 // Launching without being able to record launches risks duplicate threads, so this stops the daemon.
 class StateWriteError extends Error {}
 
+async function recordOrStop(state: StateStore, issueId: string, record: LaunchRecord): Promise<void> {
+  try {
+    await state.record(issueId, record);
+  } catch (error) {
+    throw new StateWriteError(`${record.identifier}: could not record thread ${record.threadId}: ${(error as Error).message}`);
+  }
+}
+
 interface Candidate {
   issue: Issue;
   projectRef: string;
@@ -99,11 +108,7 @@ async function launchIssue(
       ...(onLaunch.moveToState && { moveToState: onLaunch.moveToState }),
     },
   };
-  try {
-    await state.record(issue.id, record);
-  } catch (error) {
-    throw new StateWriteError(`${issue.identifier}: started thread ${threadId} but could not record it: ${(error as Error).message}`);
-  }
+  await recordOrStop(state, issue.id, record);
   log(`${issue.identifier}: ${resumed ? "found existing" : "started"} T3 thread ${threadId} in "${project.title}"`);
   await runPendingActions(issue.id, record, { config, linear, state }, issue);
 }
@@ -120,8 +125,8 @@ async function runPendingActions(
   if (pendingActions.comment) {
     try {
       const link = await threadLink(config, record.threadId);
-      const { success } = await linear.createComment({ issueId, body: `Started a T3 Code thread for this issue: ${link}` });
-      if (!success) throw new Error("Linear did not create the comment");
+      const body = `Started a T3 Code thread for this issue: ${link}`;
+      await createCommentOnce(linear, stableUuid(`${issueId}:comment`, 4), issueId, body);
       delete pendingActions.comment;
     } catch (error) {
       log(`${record.identifier}: commenting on Linear failed, will retry: ${(error as Error).message}`);
@@ -135,7 +140,7 @@ async function runPendingActions(
       log(`${record.identifier}: moving Linear issue failed, will retry: ${(error as Error).message}`);
     }
   }
-  await state.record(issueId, { ...record, pendingActions });
+  await recordOrStop(state, issueId, { ...record, pendingActions });
 }
 
 // Issues whose launch failed are skipped until `retryAt`, so they can't starve the rest of the queue.
@@ -175,7 +180,9 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
   // Round-robin across projects so a busy project can't use up the whole per-poll cap.
   const queues = new Map<string, Candidate[]>();
   for (const candidate of pending.values()) {
-    queues.set(candidate.projectRef, [...(queues.get(candidate.projectRef) ?? []), candidate]);
+    const queue = queues.get(candidate.projectRef);
+    if (queue) queue.push(candidate);
+    else queues.set(candidate.projectRef, [candidate]);
   }
   const ordered: Candidate[] = [];
   for (let i = 0; ordered.length < pending.size; i++) {

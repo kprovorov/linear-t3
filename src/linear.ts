@@ -9,6 +9,20 @@ export async function listIssues(client: LinearClient, filter: LinearDocument.Is
   return issues.nodes;
 }
 
+/**
+ * Creates a comment with a caller-chosen id. Retrying with the same id never duplicates it:
+ * if the create fails, it checks whether a comment with that id already exists.
+ */
+export async function createCommentOnce(client: LinearClient, id: string, issueId: string, body: string): Promise<void> {
+  try {
+    const { success } = await client.createComment({ id, issueId, body });
+    if (!success) throw new Error("Linear did not create the comment");
+  } catch (error) {
+    const existing = await client.comment({ id }).catch(() => null);
+    if (!existing) throw error;
+  }
+}
+
 const stateIdsByTeam = new Map<string, Map<string, string>>();
 
 export async function moveToState(client: LinearClient, issue: Issue, stateName: string): Promise<void> {
