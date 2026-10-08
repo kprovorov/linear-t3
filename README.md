@@ -8,7 +8,7 @@ A small daemon that polls Linear for issues that match your filters and starts a
 - After a thread starts, the daemon can comment on the issue with the thread link and move the issue to another workflow state.
 - Launched issues are recorded in `state.json`, so restarting the daemon never starts the same issue twice.
 
-It is written in TypeScript, uses the official [`@linear/sdk`](https://github.com/linear/linear/tree/master/packages/sdk), and runs directly on Node ≥ 22.18 using built-in type stripping, so there is no build step.
+It is written in TypeScript, uses the official [`@linear/sdk`](https://github.com/linear/linear/tree/master/packages/sdk), and runs directly on Node 22.18+, 24.11+ or 26+ using built-in type stripping, so there is no build step.
 
 ## Setup
 
@@ -25,6 +25,13 @@ Try it without starting any threads:
 npm run dry-run    # lists the issues it would launch
 npm run once       # one real poll, then exit
 npm start          # run continuously
+```
+
+The project uses [Vite+](https://viteplus.dev) for formatting, linting and type checking. `npm install` installs it locally, so run it through `npx`:
+
+```sh
+npx vp check         # format check, lint and type check
+npx vp check --fix   # apply formatting and lint fixes
 ```
 
 ## Configuration
@@ -58,12 +65,12 @@ Project settings. Each value comes from the project if it sets one, otherwise fr
 ## Running as a daemon (pm2)
 
 ```sh
-pm2 start ecosystem.config.cjs
+pm2 start
 pm2 logs linear-t3
 pm2 save && pm2 startup   # restart on reboot
 ```
 
-`ecosystem.config.cjs` runs `src/main.ts` directly with `--env-file=.env`. When pm2 stops the process, it lets the current launch finish before exiting.
+`ecosystem.config.js`, which pm2 picks up from the current directory, runs `src/main.ts` directly with `--env-file=.env`. When pm2 stops the process, it lets the current launch finish before exiting.
 
 ## How it talks to T3 Code
 
