@@ -57,12 +57,12 @@ Project settings:
 ## Running as a daemon (pm2)
 
 ```sh
-pm2 start ecosystem.config.cjs
+pm2 start
 pm2 logs linear-t3
 pm2 save && pm2 startup   # restart on reboot
 ```
 
-`ecosystem.config.cjs` runs `src/main.ts` directly with `--env-file=.env`. When pm2 stops the process, it lets the current launch finish before exiting.
+`ecosystem.config.js`, which pm2 picks up from the current directory, runs `src/main.ts` directly with `--env-file=.env`. When pm2 stops the process, it lets the current launch finish before exiting.
 
 ## How it talks to T3 Code
 
