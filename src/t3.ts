@@ -48,6 +48,13 @@ interface Pending {
 }
 
 const REQUEST_TIMEOUT_MS = 120_000;
+const CONNECT_TIMEOUT_MS = 15_000;
+
+/**
+ * The server answered with a failure, so the request definitely did not succeed.
+ * Other errors (timeouts, dropped sockets) leave the outcome unknown.
+ */
+export class T3RpcFailure extends Error {}
 
 export class T3Client {
   private readonly ws: WebSocket;
@@ -65,11 +72,12 @@ export class T3Client {
     });
   }
 
-  static async connect(baseUrl: string, token: string): Promise<T3Client> {
+  /** Connects to the T3 server. `signal` aborts the connection attempt. */
+  static async connect(baseUrl: string, token: string, signal: AbortSignal): Promise<T3Client> {
     const res = await fetch(new URL("/api/auth/websocket-ticket", baseUrl), {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(CONNECT_TIMEOUT_MS)]),
     });
     if (!res.ok) {
       throw new Error(`T3 websocket ticket request failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
@@ -81,10 +89,17 @@ export class T3Client {
     url.searchParams.set("wsTicket", ticket);
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener("open", () => resolve(), { once: true });
-      ws.addEventListener("error", () => reject(new Error(`Could not connect to T3 at ${baseUrl}`)), { once: true });
-    });
+    const handshake = AbortSignal.any([signal, AbortSignal.timeout(CONNECT_TIMEOUT_MS)]);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.addEventListener("open", () => resolve(), { once: true });
+        ws.addEventListener("error", () => reject(new Error(`Could not connect to T3 at ${baseUrl}`)), { once: true });
+        handshake.addEventListener("abort", () => reject(handshake.reason), { once: true });
+      });
+    } catch (error) {
+      ws.close();
+      throw error;
+    }
     return new T3Client(ws);
   }
 
@@ -111,7 +126,7 @@ export class T3Client {
           if (!p) break;
           this.pending.delete(msg.requestId);
           if (msg.exit._tag === "Success") p.resolve(msg.exit.value);
-          else p.reject(new Error(`T3 RPC failed: ${JSON.stringify(msg.exit.cause)}`));
+          else p.reject(new T3RpcFailure(`T3 RPC failed: ${JSON.stringify(msg.exit.cause)}`));
           break;
         }
         case "Defect":

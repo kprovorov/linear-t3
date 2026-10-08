@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings } from "./config.ts";
 import { createCommentOnce, LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
-import { T3Client, type T3Project, type WorkspaceStrategy } from "./t3.ts";
+import { T3Client, T3RpcFailure, type T3Project, type WorkspaceStrategy } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
 
 const { values: args } = parseArgs({
@@ -79,6 +79,7 @@ interface Candidate {
 async function launchIssue(
   { issue, projectRef, settings }: Candidate,
   project: T3Project,
+  attempt: number,
   ctx: { config: Config; t3: T3Client; linear: LinearClient; state: StateStore },
 ): Promise<void> {
   const { config, t3, linear, state } = ctx;
@@ -88,7 +89,8 @@ async function launchIssue(
   }
 
   const { threadId, resumed } = await t3.launchThread({
-    idempotencyKey: issue.id,
+    // Attempt 0 keeps the plain issue id; later attempts get a fresh thread id (see recordLaunchFailure).
+    idempotencyKey: attempt === 0 ? issue.id : `${issue.id}:${attempt}`,
     projectId: project.id,
     title: `${issue.identifier}: ${issue.title}`,
     modelSelection,
@@ -144,12 +146,20 @@ async function runPendingActions(
 }
 
 // Issues whose launch failed are skipped until `retryAt`, so they can't starve the rest of the queue.
-const launchFailures = new Map<string, { count: number; retryAt: number }>();
+const launchFailures = new Map<string, { count: number; retryAt: number; attempt: number }>();
 
-function recordLaunchFailure(issueId: string): void {
-  const count = (launchFailures.get(issueId)?.count ?? 0) + 1;
+/**
+ * A definite T3 failure moves the issue to a new thread id: T3 deletes a thread whose bootstrap
+ * failed, and a deleted id can't be reused. An uncertain failure (timeout, dropped socket) keeps
+ * the id, so the retry returns the thread if it was created. Attempts live in memory: after a
+ * restart, replaying from 0 steps past dead ids to the live thread or a fresh one.
+ */
+function recordLaunchFailure(issueId: string, error: unknown): void {
+  const previous = launchFailures.get(issueId);
+  const count = (previous?.count ?? 0) + 1;
+  const attempt = (previous?.attempt ?? 0) + (error instanceof T3RpcFailure ? 1 : 0);
   const delayMs = Math.min(60_000 * 2 ** (count - 1), 60 * 60_000);
-  launchFailures.set(issueId, { count, retryAt: Date.now() + delayMs });
+  launchFailures.set(issueId, { count, retryAt: Date.now() + delayMs, attempt });
 }
 
 async function poll(config: Config, linear: LinearClient, state: StateStore, t3Token: string, dryRun: boolean) {
@@ -190,22 +200,27 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
   }
 
   log(`${ordered.length} new issue(s): ${ordered.map((p) => p.issue.identifier).join(", ")}`);
-  if (dryRun) return;
+  if (dryRun || shutdown.signal.aborted) return;
 
-  const t3 = await T3Client.connect(config.t3.url, t3Token);
+  const t3 = await T3Client.connect(config.t3.url, t3Token, shutdown.signal);
   try {
-    const projects = await t3.listProjects();
+    // Shutdown may arrive while reading projects; closing the socket ends that wait.
+    const closeOnShutdown = () => t3.close();
+    shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
+    const projects = await t3.listProjects().finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
     let launched = 0;
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
     for (const candidate of ordered) {
       if (launched >= config.maxLaunchesPerPoll || shutdown.signal.aborted) break;
       try {
-        await launchIssue(candidate, findProject(projects, candidate.projectRef), { config, t3, linear, state });
+        const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
+        const project = findProject(projects, candidate.projectRef);
+        await launchIssue(candidate, project, attempt, { config, t3, linear, state });
         launchFailures.delete(candidate.issue.id);
         launched++;
       } catch (error) {
         if (error instanceof StateWriteError) throw error;
-        recordLaunchFailure(candidate.issue.id);
+        recordLaunchFailure(candidate.issue.id, error);
         log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
       }
     }
