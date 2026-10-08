@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings } from "./config.ts";
 import { createCommentOnce, LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
-import { T3Client, T3RpcFailure, type T3Project, type WorkspaceStrategy } from "./t3.ts";
+import { T3Client, T3ThreadNotCreated, type T3Project, type WorkspaceStrategy } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
 
 const { values: args } = parseArgs({
@@ -149,15 +149,15 @@ async function runPendingActions(
 const launchFailures = new Map<string, { count: number; retryAt: number; attempt: number }>();
 
 /**
- * A definite T3 failure moves the issue to a new thread id: T3 deletes a thread whose bootstrap
- * failed, and a deleted id can't be reused. An uncertain failure (timeout, dropped socket) keeps
- * the id, so the retry returns the thread if it was created. Attempts live in memory: after a
+ * A launch that failed with the thread confirmed absent moves the issue to a new thread id: T3
+ * deletes a thread whose bootstrap failed, and a deleted id can't be reused. Any other failure
+ * keeps the id, so the retry returns the thread if it exists. Attempts live in memory: after a
  * restart, replaying from 0 steps past dead ids to the live thread or a fresh one.
  */
 function recordLaunchFailure(issueId: string, error: unknown): void {
   const previous = launchFailures.get(issueId);
   const count = (previous?.count ?? 0) + 1;
-  const attempt = (previous?.attempt ?? 0) + (error instanceof T3RpcFailure ? 1 : 0);
+  const attempt = (previous?.attempt ?? 0) + (error instanceof T3ThreadNotCreated ? 1 : 0);
   const delayMs = Math.min(60_000 * 2 ** (count - 1), 60 * 60_000);
   launchFailures.set(issueId, { count, retryAt: Date.now() + delayMs, attempt });
 }

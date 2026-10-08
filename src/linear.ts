@@ -34,8 +34,14 @@ export async function moveToState(client: LinearClient, issue: Issue, stateName:
     states = new Map(nodes.map((s) => [s.name.toLowerCase(), s.id]));
     stateIdsByTeam.set(teamId, states);
   }
-  const stateId = states.get(stateName.toLowerCase());
-  if (!stateId) throw new Error(`Issue ${issue.identifier}'s team has no workflow state named "${stateName}"`);
-  const { success } = await client.updateIssue(issue.id, { stateId });
-  if (!success) throw new Error(`Linear did not apply the state change for ${issue.identifier}`);
+  try {
+    const stateId = states.get(stateName.toLowerCase());
+    if (!stateId) throw new Error(`Issue ${issue.identifier}'s team has no workflow state named "${stateName}"`);
+    const { success } = await client.updateIssue(issue.id, { stateId });
+    if (!success) throw new Error(`Linear did not apply the state change for ${issue.identifier}`);
+  } catch (error) {
+    // The team's workflow may have changed; refetch its states on the next attempt.
+    stateIdsByTeam.delete(teamId);
+    throw error;
+  }
 }

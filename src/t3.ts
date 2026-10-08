@@ -56,6 +56,15 @@ const CONNECT_TIMEOUT_MS = 15_000;
  */
 export class T3RpcFailure extends Error {}
 
+/** A launch failed and T3's state confirms the thread doesn't exist (never created, or deleted). */
+export class T3ThreadNotCreated extends Error {}
+
+interface ShellSnapshot {
+  projects: T3Project[];
+  threads: { id: string }[];
+  archivedThreads: { id: string }[];
+}
+
 export class T3Client {
   private readonly ws: WebSocket;
   private readonly pending = new Map<string, Pending>();
@@ -164,15 +173,15 @@ export class T3Client {
     this.send({ _tag: "Interrupt", requestId, interruptors: [] });
   }
 
-  /** Reads the current project list from the first shell snapshot. */
-  async listProjects(): Promise<T3Project[]> {
+  /** Reads the first snapshot of the shell subscription, then stops it. */
+  private shellSnapshot(): Promise<ShellSnapshot> {
     const requestId = String(this.nextId);
     return new Promise((resolve, reject) => {
       this.call("orchestration.subscribeShell", {}, (values) => {
-        for (const value of values as { kind: string; snapshot?: { projects: T3Project[] } }[]) {
+        for (const value of values as { kind: string; snapshot?: ShellSnapshot }[]) {
           if (value.kind === "snapshot" && value.snapshot) {
             this.interrupt(requestId);
-            resolve(value.snapshot.projects);
+            resolve(value.snapshot);
             return;
           }
         }
@@ -180,13 +189,40 @@ export class T3Client {
     });
   }
 
+  async listProjects(): Promise<T3Project[]> {
+    return (await this.shellSnapshot()).projects;
+  }
+
+  /** Whether T3 has the thread, active or archived. Deleted threads are absent from the snapshot. */
+  private async threadExists(threadId: string): Promise<boolean> {
+    const { threads, archivedThreads } = await this.shellSnapshot();
+    return [...threads, ...archivedThreads].some((t) => t.id === threadId);
+  }
+
+  /**
+   * Starts a thread. Throws T3ThreadNotCreated only when the launch failed and the thread is
+   * confirmed absent, so it's safe to retry under a new idempotency key. Any other error means
+   * the thread may exist, and a retry must reuse the same key.
+   */
   async launchThread(input: LaunchThreadInput): Promise<{ threadId: string; resumed: boolean }> {
+    const threadId = stableUuid(`${input.idempotencyKey}:thread`);
+    try {
+      return await this.launch(threadId, input);
+    } catch (error) {
+      if (error instanceof T3RpcFailure && !(await this.threadExists(threadId).catch(() => true))) {
+        throw new T3ThreadNotCreated(error.message);
+      }
+      throw error;
+    }
+  }
+
+  private async launch(threadId: string, input: LaunchThreadInput): Promise<{ threadId: string; resumed: boolean }> {
     const result = (await this.call("orchestration.launchThread", {
       commandId: randomUUID(),
       creationSource: "server",
       // Same scheme as the T3 web client: a pre-allocated thread id plus reuseExistingThread
       // makes a retry after a lost response return the existing thread.
-      threadId: stableUuid(`${input.idempotencyKey}:thread`),
+      threadId,
       reuseExistingThread: true,
       projectId: input.projectId,
       title: input.title,
