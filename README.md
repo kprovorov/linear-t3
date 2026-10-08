@@ -8,7 +8,7 @@ A small daemon that polls Linear for issues that match your filters and starts a
 - After a thread starts, the daemon can comment on the issue with the thread link and move the issue to another workflow state.
 - Launched issues are recorded in `state.json`, so restarting the daemon never starts the same issue twice.
 
-It is written in TypeScript, uses the official [`@linear/sdk`](https://github.com/linear/linear/tree/master/packages/sdk), and runs directly on Node ≥ 22.18 using built-in type stripping, so there is no build step.
+It is written in TypeScript, uses the official [`@linear/sdk`](https://github.com/linear/linear/tree/master/packages/sdk), and runs directly on Node 22.18+, 24.11+ or 26+ using built-in type stripping, so there is no build step.
 
 ## Setup
 
@@ -27,11 +27,11 @@ npm run once       # one real poll, then exit
 npm start          # run continuously
 ```
 
-The project uses [Vite+](https://viteplus.dev) for formatting, linting and type checking. You can run the scripts above with `vp run <script>` too.
+The project uses [Vite+](https://viteplus.dev) for formatting, linting and type checking. `npm install` installs it locally, so run it through `npx`:
 
 ```sh
-vp check           # format check, lint and type check
-vp check --fix     # apply formatting and lint fixes
+npx vp check         # format check, lint and type check
+npx vp check --fix   # apply formatting and lint fixes
 ```
 
 ## Configuration
