@@ -5,6 +5,7 @@ import { setTimeout } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings } from "./config.ts";
 import { createCommentOnce, LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
+import { ScanTracker } from "./scan.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import { T3Client, T3ThreadNotCreated, type T3Project, type WorkspaceStrategy } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
@@ -179,12 +180,37 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
     }
   }
 
+  // Per project: when this scan started and which matching issues it saw. Committed once launches
+  // are done (or the poll fails), so issues left unlaunched are carried into the next scan.
+  const scanned = new Map<string, { startedAt: number; issueIds: string[] }>();
+  try {
+    const candidates = await collectCandidates(config, linear, state, scanned);
+    if (candidates.length === 0) return;
+    log(`${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`);
+    if (dryRun || shutdown.signal.aborted) return;
+    await launchCandidates(candidates, { config, linear, state, t3Token });
+  } finally {
+    for (const [projectRef, { startedAt, issueIds }] of scanned) {
+      scans.complete(projectRef, startedAt, issueIds.filter((id) => !state.has(id)));
+    }
+  }
+}
+
+/** Matching issues not launched yet and not backing off, round-robin across projects. */
+async function collectCandidates(
+  config: Config,
+  linear: LinearClient,
+  state: StateStore,
+  scanned: Map<string, { startedAt: number; issueIds: string[] }>,
+): Promise<Candidate[]> {
   const now = Date.now();
   const pending = new Map<string, Candidate>();
   for (const [projectRef, settings] of Object.entries(config.projects)) {
-    const filter = { and: [{ team: { key: { eq: settings.linear.team } } }, settings.linear.filter ?? {}] };
-    if (shutdown.signal.aborted) return;
+    if (shutdown.signal.aborted) return [];
+    const startedAt = Date.now();
+    const filter = scans.filter(projectRef, [{ team: { key: { eq: settings.linear.team } } }, settings.linear.filter ?? {}]);
     const issues = await listIssues(linear, filter, shutdown.signal);
+    scanned.set(projectRef, { startedAt, issueIds: issues.map((i) => i.id) });
     for (const issue of issues) {
       if (state.has(issue.id) || (launchFailures.get(issue.id)?.retryAt ?? 0) > now) continue;
       // An issue matched by several projects gets a single thread, in the first matching project.
@@ -196,7 +222,6 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
       pending.set(issue.id, { issue, projectRef, settings });
     }
   }
-  if (pending.size === 0) return;
 
   // Round-robin across projects so a busy project can't use up the whole per-poll cap.
   const queues = new Map<string, Candidate[]>();
@@ -209,10 +234,14 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
   for (let i = 0; ordered.length < pending.size; i++) {
     for (const queue of queues.values()) if (queue[i]) ordered.push(queue[i]!);
   }
+  return ordered;
+}
 
-  log(`${ordered.length} new issue(s): ${ordered.map((p) => p.issue.identifier).join(", ")}`);
-  if (dryRun || shutdown.signal.aborted) return;
-
+async function launchCandidates(
+  candidates: Candidate[],
+  ctx: { config: Config; linear: LinearClient; state: StateStore; t3Token: string },
+): Promise<void> {
+  const { config, linear, state, t3Token } = ctx;
   const t3 = await T3Client.connect(config.t3.url, t3Token, shutdown.signal);
   try {
     // Shutdown may arrive while reading projects; closing the socket ends that wait.
@@ -221,7 +250,7 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
     const projects = await t3.listProjects().finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
     let launched = 0;
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
-    for (const candidate of ordered) {
+    for (const candidate of candidates) {
       if (launched >= config.maxLaunchesPerPoll || shutdown.signal.aborted) break;
       try {
         const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
@@ -240,6 +269,8 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
     t3.close();
   }
 }
+
+const scans = new ScanTracker();
 
 async function main() {
   const stop = (signal: string) => {

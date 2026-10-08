@@ -1,6 +1,6 @@
 import { LinearClient, LinearDocument, type Issue } from "@linear/sdk";
 
-export { LinearClient, type Issue };
+export { LinearClient, type Issue, type LinearDocument };
 
 export async function listIssues(
   client: LinearClient,
