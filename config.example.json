@@ -1,6 +1,7 @@
 {
   "pollIntervalSeconds": 60,
   "maxLaunchesPerPoll": 5,
+  "fullScanIntervalMinutes": 60,
   "stateFile": "./state.json",
   "t3": {
     "url": "http://127.0.0.1:3773"

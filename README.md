@@ -35,6 +35,7 @@ See `config.example.json`. The main keys:
 | --- | --- |
 | `pollIntervalSeconds` | How often to poll Linear. Default `60`. |
 | `maxLaunchesPerPoll` | Maximum number of threads started per poll. Default `5`. |
+| `fullScanIntervalMinutes` | How often each project re-reads every matching issue. Default `60`. Polls in between only read recently updated issues. |
 | `t3.url` | T3 server URL. Default `http://127.0.0.1:3773`. |
 | `t3.webUrl` | Optional public T3 web URL. When set, the Linear comment includes a clickable thread link. |
 | `projects` | One entry per T3 project. The key is the T3 project id, title or workspace path. |
