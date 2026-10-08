@@ -4,13 +4,13 @@
 
 A small daemon that polls Linear for issues that match your filters and starts a [T3 Code](https://t3.codes) thread for each one. It runs on the same machine as the T3 Code server.
 
-- Each Linear team maps to one T3 project. You can give the project as its id, its title, or its workspace path.
+- Each Linear team maps to one T3 project. You can give the project as its id, its title, or its workspace path. Several teams can share a project.
 - Each team gets the global Linear `IssueFilter` AND its own team filter.
-- By default each issue gets its own git worktree, on the issue's Linear branch name.
+- Thread settings are per project: workspace (a git worktree per issue on the issue's Linear branch name, or the main checkout), runtime mode, interaction mode, model, and prompt template.
 - After a thread starts, the daemon can comment on the issue with the thread link and move the issue to another workflow state.
 - Launched issues are recorded in `state.json`, so restarting the daemon never starts the same issue twice.
 
-It is written in TypeScript and runs directly on Node ≥ 22.18 using built-in type stripping, so there is no build step.
+It is written in TypeScript, uses the official [`@linear/sdk`](https://github.com/linear/linear/tree/master/packages/sdk), and runs directly on Node ≥ 22.18 using built-in type stripping, so there is no build step.
 
 ## Setup
 
@@ -24,7 +24,6 @@ t3 auth session issue --label linear-t3 --ttl 365d --token-only   # paste into T
 Try it without starting any threads:
 
 ```sh
-set -a; . ./.env; set +a
 npm run dry-run    # lists the issues it would launch
 npm run once       # one real poll, then exit
 npm start          # run continuously
@@ -43,22 +42,28 @@ See `config.example.json`. The main keys:
 | `linear.filter` | Linear [`IssueFilter`](https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter) applied to every team. |
 | `linear.onLaunch.comment` | Comment on the issue with the thread link. Default `true`. |
 | `linear.onLaunch.moveToState` | Workflow state name to move the issue to once its thread starts. |
-| `defaults` | Defaults for `workspace`, `model`, `runtimeMode`, `interactionMode` and `promptTemplate`. Any team can override them. |
-| `teams[]` | One entry per Linear team: `team` (team key), `project` (T3 project id, title or path), plus an optional `filter` and any of the overrides above. |
+| `projects` | Thread settings for each T3 project. The key is the T3 project id, title or workspace path. |
+| `teams[]` | One entry per Linear team: `team` (team key), `project` (a key of `projects`), and an optional `filter`. |
 
-- **`workspace`**: either `{ "type": "worktree", "baseRef": "main", "startFromOrigin": true }` (the default) or `{ "type": "root" }`.
-- **`model`**: `{ "instanceId": "claudeAgent", "model": "claude-opus-5-5" }`. If omitted, the T3 project's default model is used.
-- **`promptTemplate` placeholders**: `{identifier}`, `{title}`, `{url}`, `{description}`, `{branchName}`.
+Project settings:
 
-## Running as a daemon (systemd)
+| Key | Default | Description |
+| --- | --- | --- |
+| `workspace` | `{ "type": "worktree", "baseRef": "main", "startFromOrigin": true }` | Or `{ "type": "root" }` to use the project's main checkout. |
+| `runtimeMode` | `full-access` | `approval-required`, `auto-accept-edits`, `auto` or `full-access`. |
+| `interactionMode` | `default` | `default` or `plan`. |
+| `model` | T3 project's default model | For example `{ "instanceId": "claudeAgent", "model": "claude-opus-5-5" }`. |
+| `promptTemplate` | built-in | Placeholders: `{identifier}`, `{title}`, `{url}`, `{description}`, `{branchName}`. |
+
+## Running as a daemon (pm2)
 
 ```sh
-cp deploy/linear-t3.service ~/.config/systemd/user/   # adjust WorkingDirectory if needed
-systemctl --user daemon-reload
-systemctl --user enable --now linear-t3
-loginctl enable-linger "$USER"
-journalctl --user -u linear-t3 -f
+pm2 start ecosystem.config.cjs
+pm2 logs linear-t3
+pm2 save && pm2 startup   # restart on reboot
 ```
+
+`ecosystem.config.cjs` runs `src/main.ts` directly with `--env-file=.env`. When pm2 stops the process, it lets the current launch finish before exiting.
 
 ## How it talks to T3 Code
 

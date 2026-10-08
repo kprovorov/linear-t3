@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type TeamMapping } from "./config.ts";
-import { LinearClient, type LinearIssue } from "./linear.ts";
+import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings, type TeamMapping } from "./config.ts";
+import { LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
 import { StateStore } from "./state.ts";
 import { T3Client, type T3Project, type WorkspaceStrategy } from "./t3.ts";
 
@@ -17,7 +17,7 @@ const { values: args } = parseArgs({
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
-function renderPrompt(template: string, issue: LinearIssue): string {
+function renderPrompt(template: string, issue: Issue): string {
   const vars: Record<string, string> = {
     identifier: issue.identifier,
     title: issue.title,
@@ -37,8 +37,8 @@ function findProject(projects: T3Project[], ref: string): T3Project {
   return project;
 }
 
-function workspaceFor(mapping: TeamMapping, config: Config, issue: LinearIssue): WorkspaceStrategy {
-  const ws = mapping.workspace ?? config.defaults.workspace ?? { type: "worktree", baseRef: "main", startFromOrigin: true };
+function workspaceFor(settings: ProjectSettings, issue: Issue): WorkspaceStrategy {
+  const ws = settings.workspace;
   return ws.type === "root" ? { type: "root" } : { ...ws, branch: issue.branchName };
 }
 
@@ -50,25 +50,26 @@ async function threadLink(config: Config, threadId: string): Promise<string> {
 }
 
 async function launchIssue(
-  issue: LinearIssue,
+  issue: Issue,
   mapping: TeamMapping,
   project: T3Project,
   ctx: { config: Config; t3: T3Client; linear: LinearClient; state: StateStore },
 ): Promise<void> {
   const { config, t3, linear, state } = ctx;
-  const modelSelection = mapping.model ?? config.defaults.model ?? project.defaultModelSelection;
+  const settings = config.projects[mapping.project]!;
+  const modelSelection = settings.model ?? project.defaultModelSelection;
   if (!modelSelection) {
-    throw new Error(`No model configured for team ${mapping.team} and project "${project.title}" has no default model`);
+    throw new Error(`No model configured for project "${mapping.project}" and the T3 project has no default model`);
   }
 
   const { threadId } = await t3.launchThread({
     projectId: project.id,
     title: `${issue.identifier}: ${issue.title}`,
     modelSelection,
-    runtimeMode: mapping.runtimeMode ?? config.defaults.runtimeMode ?? "full-access",
-    interactionMode: mapping.interactionMode ?? config.defaults.interactionMode ?? "default",
-    workspaceStrategy: workspaceFor(mapping, config, issue),
-    message: renderPrompt(mapping.promptTemplate ?? config.defaults.promptTemplate ?? DEFAULT_PROMPT, issue),
+    runtimeMode: settings.runtimeMode,
+    interactionMode: settings.interactionMode,
+    workspaceStrategy: workspaceFor(settings, issue),
+    message: renderPrompt(settings.promptTemplate ?? DEFAULT_PROMPT, issue),
   });
   // Record before touching Linear: a failed Linear update must never cause a duplicate thread.
   await state.record(issue.id, { identifier: issue.identifier, threadId, launchedAt: new Date().toISOString() });
@@ -78,21 +79,21 @@ async function launchIssue(
   try {
     if (onLaunch.comment) {
       const link = await threadLink(config, threadId);
-      await linear.comment(issue.id, `Started a T3 Code thread for this issue: ${link}`);
+      await linear.createComment({ issueId: issue.id, body: `Started a T3 Code thread for this issue: ${link}` });
     }
-    if (onLaunch.moveToState) await linear.moveToState(issue, onLaunch.moveToState);
+    if (onLaunch.moveToState) await moveToState(linear, issue, onLaunch.moveToState);
   } catch (error) {
     log(`${issue.identifier}: thread started but updating Linear failed: ${(error as Error).message}`);
   }
 }
 
 async function poll(config: Config, linear: LinearClient, state: StateStore, t3Token: string, dryRun: boolean) {
-  const pending: { issue: LinearIssue; mapping: TeamMapping }[] = [];
+  const pending: { issue: Issue; mapping: TeamMapping }[] = [];
   for (const mapping of config.teams) {
     const filter = {
       and: [{ team: { key: { eq: mapping.team } } }, config.linear.filter ?? {}, mapping.filter ?? {}],
     };
-    const issues = await linear.listIssues(filter);
+    const issues = await listIssues(linear, filter);
     for (const issue of issues) if (!state.has(issue.id)) pending.push({ issue, mapping });
   }
   if (pending.length === 0) return;
@@ -118,7 +119,7 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
 
 async function main() {
   const config = await loadConfig(args.config);
-  const linear = new LinearClient(requireEnv("LINEAR_API_KEY"));
+  const linear = new LinearClient({ apiKey: requireEnv("LINEAR_API_KEY") });
   const t3Token = args["dry-run"] ? "" : requireEnv("T3_TOKEN");
   const state = new StateStore(config.stateFile);
   await state.load();

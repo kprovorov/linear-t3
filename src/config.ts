@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 
-// A raw Linear `IssueFilter` object, passed through to the GraphQL API as-is.
+// A raw Linear `IssueFilter` object, passed through to the Linear API as-is.
 // See https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter
 const IssueFilter = z.record(z.string(), z.unknown());
 
@@ -22,57 +22,69 @@ const WorkspaceStrategy = z.discriminatedUnion("type", [
   }),
 ]);
 
-const TeamMapping = z.object({
-  // Linear team key, e.g. "ENG".
-  team: z.string(),
-  // T3 project, matched against project id, title, or workspace root path.
-  project: z.string(),
-  // Extra filter for this team, AND-ed with the global filter.
-  filter: IssueFilter.optional(),
-  workspace: WorkspaceStrategy.optional(),
+// How threads are started in one T3 project.
+const ProjectSettings = z.object({
+  workspace: WorkspaceStrategy.default({ type: "worktree", baseRef: "main", startFromOrigin: true }),
+  runtimeMode: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]).default("full-access"),
+  interactionMode: z.enum(["default", "plan"]).default("default"),
   // Defaults to the T3 project's default model.
   model: ModelSelection.optional(),
-  runtimeMode: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]).optional(),
-  interactionMode: z.enum(["default", "plan"]).optional(),
   promptTemplate: z.string().optional(),
 });
 
-const Config = z.object({
-  pollIntervalSeconds: z.number().int().min(10).default(60),
-  // Caps how many threads are started per poll so a broad filter can't flood T3.
-  maxLaunchesPerPoll: z.number().int().min(1).default(5),
-  stateFile: z.string().default("./state.json"),
-  t3: z
-    .object({
-      url: z.string().url().default("http://127.0.0.1:3773"),
-      // Optional public web URL, used to link the thread in the Linear comment.
-      webUrl: z.string().url().optional(),
-    })
-    .prefault({}),
-  linear: z
-    .object({
-      // Applied to every team, AND-ed with the team's own filter.
-      filter: IssueFilter.optional(),
-      onLaunch: z
-        .object({
-          // Workflow state name to move the issue to once its thread is started.
-          moveToState: z.string().optional(),
-          comment: z.boolean().default(true),
-        })
-        .prefault({}),
-    })
-    .prefault({}),
-  defaults: TeamMapping.pick({
-    workspace: true,
-    model: true,
-    runtimeMode: true,
-    interactionMode: true,
-    promptTemplate: true,
-  }).prefault({}),
-  teams: z.array(TeamMapping).min(1),
+const TeamMapping = z.object({
+  // Linear team key, e.g. "ENG".
+  team: z.string(),
+  // Key into `projects`.
+  project: z.string(),
+  // Extra filter for this team, AND-ed with the global filter.
+  filter: IssueFilter.optional(),
 });
 
+const Config = z
+  .object({
+    pollIntervalSeconds: z.number().int().min(10).default(60),
+    // Caps how many threads are started per poll so a broad filter can't flood T3.
+    maxLaunchesPerPoll: z.number().int().min(1).default(5),
+    stateFile: z.string().default("./state.json"),
+    t3: z
+      .object({
+        url: z.string().url().default("http://127.0.0.1:3773"),
+        // Optional public web URL, used to link the thread in the Linear comment.
+        webUrl: z.string().url().optional(),
+      })
+      .prefault({}),
+    linear: z
+      .object({
+        // Applied to every team, AND-ed with the team's own filter.
+        filter: IssueFilter.optional(),
+        onLaunch: z
+          .object({
+            // Workflow state name to move the issue to once its thread is started.
+            moveToState: z.string().optional(),
+            comment: z.boolean().default(true),
+          })
+          .prefault({}),
+      })
+      .prefault({}),
+    // Keyed by T3 project id, title, or workspace root path.
+    projects: z.record(z.string(), ProjectSettings),
+    teams: z.array(TeamMapping).min(1),
+  })
+  .superRefine((config, ctx) => {
+    config.teams.forEach((mapping, i) => {
+      if (!(mapping.project in config.projects)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["teams", i, "project"],
+          message: `"${mapping.project}" is not defined in "projects"`,
+        });
+      }
+    });
+  });
+
 export type Config = z.infer<typeof Config>;
+export type ProjectSettings = z.infer<typeof ProjectSettings>;
 export type TeamMapping = z.infer<typeof TeamMapping>;
 export type ModelSelection = z.infer<typeof ModelSelection>;
 

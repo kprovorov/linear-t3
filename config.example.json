@@ -15,10 +15,19 @@
       "moveToState": "In Progress"
     }
   },
-  "defaults": {
-    "workspace": { "type": "worktree", "baseRef": "main", "startFromOrigin": true },
-    "runtimeMode": "full-access",
-    "interactionMode": "default"
+  "projects": {
+    "/home/me/projects/my-app": {
+      "workspace": { "type": "worktree", "baseRef": "main", "startFromOrigin": true },
+      "runtimeMode": "full-access",
+      "interactionMode": "default"
+    },
+    "infra": {
+      "workspace": { "type": "root" },
+      "runtimeMode": "approval-required",
+      "interactionMode": "plan",
+      "model": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+      "promptTemplate": "Investigate {identifier}: {title}\n\n{url}\n\n{description}\n\nWork on branch {branchName}."
+    }
   },
   "teams": [
     {
@@ -26,12 +35,7 @@
       "project": "/home/me/projects/my-app",
       "filter": { "priority": { "lte": 2, "gt": 0 } }
     },
-    {
-      "team": "OPS",
-      "project": "infra",
-      "workspace": { "type": "root" },
-      "model": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
-      "promptTemplate": "Investigate {identifier}: {title}\n\n{url}\n\n{description}\n\nWork on branch {branchName}."
-    }
+    { "team": "WEB", "project": "/home/me/projects/my-app" },
+    { "team": "OPS", "project": "infra" }
   ]
 }

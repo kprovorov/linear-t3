@@ -8,12 +8,13 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "start": "node src/main.ts",
-    "once": "node src/main.ts --once",
-    "dry-run": "node src/main.ts --once --dry-run",
+    "start": "node --env-file-if-exists=.env src/main.ts",
+    "once": "node --env-file-if-exists=.env src/main.ts --once",
+    "dry-run": "node --env-file-if-exists=.env src/main.ts --once --dry-run",
     "typecheck": "tsc"
   },
   "dependencies": {
+    "@linear/sdk": "^97.1.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
