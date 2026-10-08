@@ -62,6 +62,13 @@ async function threadLink(config: Config, threadId: string): Promise<string> {
 // Launching without being able to record launches risks duplicate threads, so this stops the daemon.
 class StateWriteError extends Error {}
 
+// The launch RPC failed but the thread may exist, so it counts toward the per-poll cap.
+class LaunchMayHaveStarted extends Error {
+  constructor(cause: unknown) {
+    super((cause as Error).message, { cause });
+  }
+}
+
 async function recordOrStop(state: StateStore, issueId: string, record: LaunchRecord): Promise<void> {
   try {
     await state.record(issueId, record);
@@ -98,6 +105,8 @@ async function launchIssue(
     interactionMode: settings.interactionMode,
     workspaceStrategy: workspaceFor(settings, issue),
     message: renderPrompt(settings.promptTemplate ?? DEFAULT_PROMPT, issue),
+  }).catch((error: unknown) => {
+    throw error instanceof T3ThreadNotCreated ? error : new LaunchMayHaveStarted(error);
   });
   // Record before touching Linear: a failed Linear update must never cause a duplicate thread.
   const { onLaunch } = settings.linear;
@@ -165,6 +174,7 @@ function recordLaunchFailure(issueId: string, error: unknown): void {
 async function poll(config: Config, linear: LinearClient, state: StateStore, t3Token: string, dryRun: boolean) {
   if (!dryRun) {
     for (const [issueId, record] of state.withPendingActions()) {
+      if (shutdown.signal.aborted) return;
       await runPendingActions(issueId, record, { config, linear, state });
     }
   }
@@ -220,6 +230,7 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
         launched++;
       } catch (error) {
         if (error instanceof StateWriteError) throw error;
+        if (error instanceof LaunchMayHaveStarted) launched++;
         recordLaunchFailure(candidate.issue.id, error);
         log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
       }
