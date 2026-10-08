@@ -35,7 +35,11 @@ export interface LaunchThreadInput {
 
 type ServerMessage =
   | { _tag: "Chunk"; requestId: string; values: unknown[] }
-  | { _tag: "Exit"; requestId: string; exit: { _tag: "Success"; value: unknown } | { _tag: "Failure"; cause: unknown } }
+  | {
+      _tag: "Exit";
+      requestId: string;
+      exit: { _tag: "Success"; value: unknown } | { _tag: "Failure"; cause: unknown };
+    }
   | { _tag: "Defect"; defect: unknown }
   | { _tag: "ClientProtocolError"; error: unknown }
   | { _tag: "Pong" };
@@ -76,7 +80,9 @@ export class T3Client {
     this.ws = ws;
     ws.addEventListener("message", (event) => this.onMessage(event.data));
     ws.addEventListener("close", (event) => {
-      this.closedError = new Error(`T3 socket closed (${event.code}${event.reason ? `: ${event.reason}` : ""})`);
+      this.closedError = new Error(
+        `T3 socket closed (${event.code}${event.reason ? `: ${event.reason}` : ""})`,
+      );
       for (const p of this.pending.values()) p.reject(this.closedError);
       this.pending.clear();
     });
@@ -90,7 +96,9 @@ export class T3Client {
       signal: AbortSignal.any([signal, AbortSignal.timeout(CONNECT_TIMEOUT_MS)]),
     });
     if (!res.ok) {
-      throw new Error(`T3 websocket ticket request failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+      throw new Error(
+        `T3 websocket ticket request failed (${res.status}): ${(await res.text()).slice(0, 300)}`,
+      );
     }
     const { ticket } = (await res.json()) as { ticket: string };
 
@@ -105,7 +113,11 @@ export class T3Client {
     try {
       await new Promise<void>((resolve, reject) => {
         ws.addEventListener("open", () => resolve(), { once: true });
-        ws.addEventListener("error", () => reject(new Error(`Could not connect to T3 at ${baseUrl}`)), { once: true });
+        ws.addEventListener(
+          "error",
+          () => reject(new Error(`Could not connect to T3 at ${baseUrl}`)),
+          { once: true },
+        );
         handshake.addEventListener("abort", () => reject(handshake.reason), { once: true });
       });
     } catch (error) {
@@ -152,7 +164,11 @@ export class T3Client {
     }
   }
 
-  private call(tag: string, payload: unknown, onChunk?: (values: unknown[]) => void): Promise<unknown> {
+  private call(
+    tag: string,
+    payload: unknown,
+    onChunk?: (values: unknown[]) => void,
+  ): Promise<unknown> {
     if (this.closedError) return Promise.reject(this.closedError);
     const id = String(this.nextId++);
     return new Promise((resolve, reject) => {
@@ -199,8 +215,12 @@ export class T3Client {
   /** Whether T3 has the thread, active or archived. Deleted threads are absent from both snapshots. */
   private async threadExists(threadId: string): Promise<boolean> {
     const active = await this.shellSnapshot();
-    const archived = (await this.call("orchestration.getArchivedShellSnapshot", {})) as { threads: { id: string }[] };
-    return [...active.threads, ...(active.archivedThreads ?? []), ...archived.threads].some((t) => t.id === threadId);
+    const archived = (await this.call("orchestration.getArchivedShellSnapshot", {})) as {
+      threads: { id: string }[];
+    };
+    return [...active.threads, ...(active.archivedThreads ?? []), ...archived.threads].some(
+      (t) => t.id === threadId,
+    );
   }
 
   /**
@@ -220,7 +240,10 @@ export class T3Client {
     }
   }
 
-  private async launch(threadId: string, input: LaunchThreadInput): Promise<{ threadId: string; resumed: boolean }> {
+  private async launch(
+    threadId: string,
+    input: LaunchThreadInput,
+  ): Promise<{ threadId: string; resumed: boolean }> {
     const result = (await this.call("orchestration.launchThread", {
       // T3 keeps a receipt per command id, so retrying with the same id after a lost response
       // returns the thread the first attempt created instead of creating another.
@@ -234,7 +257,11 @@ export class T3Client {
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       workspaceStrategy: input.workspaceStrategy,
-      initialMessage: { messageId: stableUuid(`${input.idempotencyKey}:message`), text: input.message, attachments: [] },
+      initialMessage: {
+        messageId: stableUuid(`${input.idempotencyKey}:message`),
+        text: input.message,
+        attachments: [],
+      },
     })) as { threadId: string; resumed: boolean };
     return { threadId: result.threadId, resumed: result.resumed };
   }
