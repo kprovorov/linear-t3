@@ -28,6 +28,8 @@ export class StateStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    // Fail at startup rather than after launching a thread we then can't record.
+    await this.save();
   }
 
   has(issueId: string): boolean {
@@ -41,6 +43,10 @@ export class StateStore {
   async record(issueId: string, record: LaunchRecord): Promise<void> {
     if (record.pendingActions && Object.keys(record.pendingActions).length === 0) delete record.pendingActions;
     this.launched[issueId] = record;
+    await this.save();
+  }
+
+  private async save(): Promise<void> {
     const tmp = `${this.path}.tmp`;
     await writeFile(tmp, JSON.stringify({ launched: this.launched }, null, 2));
     await rename(tmp, this.path);

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ModelSelection } from "./config.ts";
 
 // Minimal client for the T3 Code server's WebSocket RPC (Effect RPC, JSON serialization).
@@ -22,6 +22,8 @@ export type WorkspaceStrategy =
   | { type: "worktree"; baseRef: string; branch?: string; startFromOrigin?: boolean };
 
 export interface LaunchThreadInput {
+  // Stable key for this launch. Retrying with the same key reuses the thread instead of creating another.
+  idempotencyKey: string;
   projectId: string;
   title: string;
   modelSelection: ModelSelection;
@@ -162,18 +164,33 @@ export class T3Client {
     });
   }
 
-  async launchThread(input: LaunchThreadInput): Promise<{ threadId: string }> {
+  async launchThread(input: LaunchThreadInput): Promise<{ threadId: string; resumed: boolean }> {
     const result = (await this.call("orchestration.launchThread", {
       commandId: randomUUID(),
       creationSource: "server",
+      // Same scheme as the T3 web client: a pre-allocated thread id plus reuseExistingThread
+      // makes a retry after a lost response return the existing thread.
+      threadId: uuidV5(`${input.idempotencyKey}:thread`),
+      reuseExistingThread: true,
       projectId: input.projectId,
       title: input.title,
       modelSelection: input.modelSelection,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       workspaceStrategy: input.workspaceStrategy,
-      initialMessage: { text: input.message, attachments: [] },
-    })) as { threadId: string };
-    return { threadId: result.threadId };
+      initialMessage: { messageId: uuidV5(`${input.idempotencyKey}:message`), text: input.message, attachments: [] },
+    })) as { threadId: string; resumed: boolean };
+    return { threadId: result.threadId, resumed: result.resumed };
   }
+}
+
+// RFC 4122 v5 (SHA-1, name-based) UUID in a fixed namespace, so the same name always maps to the same id.
+const NAMESPACE = Buffer.from("6f1c2b8e5d3a4f7e9b0c1d2e3f4a5b6c", "hex");
+
+function uuidV5(name: string): string {
+  const bytes = createHash("sha1").update(NAMESPACE).update(name).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

@@ -70,6 +70,6 @@ T3 Code has no public API for creating threads, so this daemon uses the same Web
 1. It sends `POST /api/auth/websocket-ticket` with the bearer token and gets back a one-time ticket.
 2. It opens `ws://…/ws?wsTicket=…`, which speaks Effect RPC with JSON messages.
 3. It calls `orchestration.subscribeShell`, takes the project list from the first snapshot, then interrupts the subscription.
-4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message.
+4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message. The thread ID and message ID are derived from the Linear issue ID and sent with `reuseExistingThread`. If the response to a launch is lost and the daemon retries, T3 returns the existing thread instead of creating a second one.
 
 These RPCs are internal and could change in a future T3 Code release. The client is isolated in `src/t3.ts`.

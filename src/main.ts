@@ -58,6 +58,9 @@ async function threadLink(config: Config, threadId: string): Promise<string> {
   return new URL(`/${environmentId}/${threadId}`, config.t3.webUrl).toString();
 }
 
+// Launching without being able to record launches risks duplicate threads, so this stops the daemon.
+class StateWriteError extends Error {}
+
 interface Candidate {
   issue: Issue;
   projectRef: string;
@@ -75,7 +78,8 @@ async function launchIssue(
     throw new Error(`No model configured for project "${projectRef}" and the T3 project has no default model`);
   }
 
-  const { threadId } = await t3.launchThread({
+  const { threadId, resumed } = await t3.launchThread({
+    idempotencyKey: issue.id,
     projectId: project.id,
     title: `${issue.identifier}: ${issue.title}`,
     modelSelection,
@@ -95,8 +99,12 @@ async function launchIssue(
       ...(onLaunch.moveToState && { moveToState: onLaunch.moveToState }),
     },
   };
-  await state.record(issue.id, record);
-  log(`${issue.identifier}: started T3 thread ${threadId} in "${project.title}"`);
+  try {
+    await state.record(issue.id, record);
+  } catch (error) {
+    throw new StateWriteError(`${issue.identifier}: started thread ${threadId} but could not record it: ${(error as Error).message}`);
+  }
+  log(`${issue.identifier}: ${resumed ? "found existing" : "started"} T3 thread ${threadId} in "${project.title}"`);
   await runPendingActions(issue.id, record, { config, linear, state }, issue);
 }
 
@@ -163,7 +171,17 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
   }
   if (pending.size === 0) return;
 
-  log(`${pending.size} new issue(s): ${[...pending.values()].map((p) => p.issue.identifier).join(", ")}`);
+  // Round-robin across projects so a busy project can't use up the whole per-poll cap.
+  const queues = new Map<string, Candidate[]>();
+  for (const candidate of pending.values()) {
+    queues.set(candidate.projectRef, [...(queues.get(candidate.projectRef) ?? []), candidate]);
+  }
+  const ordered: Candidate[] = [];
+  for (let i = 0; ordered.length < pending.size; i++) {
+    for (const queue of queues.values()) if (queue[i]) ordered.push(queue[i]!);
+  }
+
+  log(`${ordered.length} new issue(s): ${ordered.map((p) => p.issue.identifier).join(", ")}`);
   if (dryRun) return;
 
   const t3 = await T3Client.connect(config.t3.url, t3Token);
@@ -171,13 +189,14 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
     const projects = await t3.listProjects();
     let launched = 0;
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
-    for (const candidate of pending.values()) {
+    for (const candidate of ordered) {
       if (launched >= config.maxLaunchesPerPoll || shutdown.signal.aborted) break;
       try {
         await launchIssue(candidate, findProject(projects, candidate.projectRef), { config, t3, linear, state });
         launchFailures.delete(candidate.issue.id);
         launched++;
       } catch (error) {
+        if (error instanceof StateWriteError) throw error;
         recordLaunchFailure(candidate.issue.id);
         log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
       }
@@ -207,6 +226,7 @@ async function main() {
     try {
       await poll(config, linear, state, t3Token, args["dry-run"]);
     } catch (error) {
+      if (error instanceof StateWriteError) throw error;
       log(`poll failed: ${(error as Error).message}`);
       if (args.once) process.exitCode = 1;
     }
