@@ -120,7 +120,8 @@ async function runPendingActions(
   if (pendingActions.comment) {
     try {
       const link = await threadLink(config, record.threadId);
-      await linear.createComment({ issueId, body: `Started a T3 Code thread for this issue: ${link}` });
+      const { success } = await linear.createComment({ issueId, body: `Started a T3 Code thread for this issue: ${link}` });
+      if (!success) throw new Error("Linear did not create the comment");
       delete pendingActions.comment;
     } catch (error) {
       log(`${record.identifier}: commenting on Linear failed, will retry: ${(error as Error).message}`);

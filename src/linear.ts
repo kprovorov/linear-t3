@@ -22,5 +22,6 @@ export async function moveToState(client: LinearClient, issue: Issue, stateName:
   }
   const stateId = states.get(stateName.toLowerCase());
   if (!stateId) throw new Error(`Issue ${issue.identifier}'s team has no workflow state named "${stateName}"`);
-  await client.updateIssue(issue.id, { stateId });
+  const { success } = await client.updateIssue(issue.id, { stateId });
+  if (!success) throw new Error(`Linear did not apply the state change for ${issue.identifier}`);
 }
