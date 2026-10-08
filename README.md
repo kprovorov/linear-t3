@@ -66,11 +66,11 @@ pm2 save && pm2 startup   # restart on reboot
 
 ## How it talks to T3 Code
 
-T3 Code has no public API for creating threads, so this daemon uses the same WebSocket RPC as the T3 web client. It was built against T3 Code `0.0.46-nightly.20261006`, whose server registers `orchestration.launchThread`, the same RPC behind T3's own `t3_thread_launch` tool. Other T3 versions may not expose these RPCs.
+T3 Code has no public API for creating threads, so this daemon uses the same WebSocket RPC as the T3 web client. It was built against T3 Code `0.0.46-nightly.20261006` and updated for orchestration protocol 2 in `0.0.46-nightly.20261008`, whose server registers `orchestration.launchThread`, the same RPC behind T3's own `t3_thread_launch` tool. Other T3 versions may not expose these RPCs.
 
 1. It sends `POST /api/auth/websocket-ticket` with the bearer token and gets back a one-time ticket.
-2. It opens `ws://…/ws?wsTicket=…`, which speaks Effect RPC with JSON messages.
+2. It opens `ws://…/ws?wsTicket=…&orchestrationProtocol=2`, which speaks Effect RPC with JSON messages. Servers that require protocol 2 reject sockets that don't declare it with `426 orchestration_protocol_incompatible`.
 3. It calls `orchestration.subscribeShell`, takes the project list from the first snapshot, then interrupts the subscription.
-4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message. The thread ID and message ID are derived from the Linear issue ID and sent with `reuseExistingThread`. If the response to a launch is lost and the daemon retries, T3 returns the existing thread instead of creating a second one.
+4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message. The command ID, thread ID and message ID are all derived from the Linear issue ID. T3 keeps a receipt for each command ID, so if the response to a launch is lost and the daemon retries with the same command ID, T3 returns the thread the first attempt created instead of creating a second one. The daemon does not send `reuseExistingThread`: in protocol 2 it means "start a run in an existing empty thread", and sending it for a new thread fails with `ProjectionStoreThreadNotFoundError`.
 
 These RPCs are internal and could change in a future T3 Code release. Run `npm run once` after updating T3 to confirm launches still work. The client is isolated in `src/t3.ts`.
