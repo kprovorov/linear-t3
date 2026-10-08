@@ -49,6 +49,7 @@ interface Pending {
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const CONNECT_TIMEOUT_MS = 15_000;
+const ORCHESTRATION_PROTOCOL = 2;
 
 /**
  * The server answered with a failure, so the request definitely did not succeed.
@@ -97,6 +98,8 @@ export class T3Client {
     const url = new URL("/ws", baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("wsTicket", ticket);
+    // Servers reject sockets that don't declare a protocol they support (426 orchestration_protocol_incompatible).
+    url.searchParams.set("orchestrationProtocol", String(ORCHESTRATION_PROTOCOL));
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     const handshake = AbortSignal.any([signal, AbortSignal.timeout(CONNECT_TIMEOUT_MS)]);
