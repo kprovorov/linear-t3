@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings, type TeamMapping } from "./config.ts";
+import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings } from "./config.ts";
 import { LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
 import { StateStore } from "./state.ts";
 import { T3Client, type T3Project, type WorkspaceStrategy } from "./t3.ts";
@@ -49,17 +49,21 @@ async function threadLink(config: Config, threadId: string): Promise<string> {
   return new URL(`/${environmentId}/${threadId}`, config.t3.webUrl).toString();
 }
 
+interface Candidate {
+  issue: Issue;
+  projectRef: string;
+  settings: ProjectSettings;
+}
+
 async function launchIssue(
-  issue: Issue,
-  mapping: TeamMapping,
+  { issue, projectRef, settings }: Candidate,
   project: T3Project,
   ctx: { config: Config; t3: T3Client; linear: LinearClient; state: StateStore },
 ): Promise<void> {
   const { config, t3, linear, state } = ctx;
-  const settings = config.projects[mapping.project]!;
   const modelSelection = settings.model ?? project.defaultModelSelection;
   if (!modelSelection) {
-    throw new Error(`No model configured for project "${mapping.project}" and the T3 project has no default model`);
+    throw new Error(`No model configured for project "${projectRef}" and the T3 project has no default model`);
   }
 
   const { threadId } = await t3.launchThread({
@@ -75,7 +79,7 @@ async function launchIssue(
   await state.record(issue.id, { identifier: issue.identifier, threadId, launchedAt: new Date().toISOString() });
   log(`${issue.identifier}: started T3 thread ${threadId} in "${project.title}"`);
 
-  const { onLaunch } = config.linear;
+  const { onLaunch } = settings.linear;
   try {
     if (onLaunch.comment) {
       const link = await threadLink(config, threadId);
@@ -88,13 +92,11 @@ async function launchIssue(
 }
 
 async function poll(config: Config, linear: LinearClient, state: StateStore, t3Token: string, dryRun: boolean) {
-  const pending: { issue: Issue; mapping: TeamMapping }[] = [];
-  for (const mapping of config.teams) {
-    const filter = {
-      and: [{ team: { key: { eq: mapping.team } } }, config.linear.filter ?? {}, mapping.filter ?? {}],
-    };
+  const pending: Candidate[] = [];
+  for (const [projectRef, settings] of Object.entries(config.projects)) {
+    const filter = { and: [{ team: { key: { eq: settings.linear.team } } }, settings.linear.filter ?? {}] };
     const issues = await listIssues(linear, filter);
-    for (const issue of issues) if (!state.has(issue.id)) pending.push({ issue, mapping });
+    for (const issue of issues) if (!state.has(issue.id)) pending.push({ issue, projectRef, settings });
   }
   if (pending.length === 0) return;
 
@@ -105,11 +107,11 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
   const t3 = await T3Client.connect(config.t3.url, t3Token);
   try {
     const projects = await t3.listProjects();
-    for (const { issue, mapping } of batch) {
+    for (const candidate of batch) {
       try {
-        await launchIssue(issue, mapping, findProject(projects, mapping.project), { config, t3, linear, state });
+        await launchIssue(candidate, findProject(projects, candidate.projectRef), { config, t3, linear, state });
       } catch (error) {
-        log(`${issue.identifier}: failed to start thread: ${(error as Error).message}`);
+        log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
       }
     }
   } finally {
@@ -134,7 +136,8 @@ async function main() {
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
 
-  log(`watching ${config.teams.map((t) => `${t.team} -> ${t.project}`).join(", ")}`);
+  const watching = Object.entries(config.projects).map(([ref, p]) => `${p.linear.team} -> ${ref}`);
+  log(`watching ${watching.join(", ")}`);
   while (!stopping) {
     try {
       await poll(config, linear, state, t3Token, args["dry-run"]);

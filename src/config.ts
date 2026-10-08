@@ -22,8 +22,23 @@ const WorkspaceStrategy = z.discriminatedUnion("type", [
   }),
 ]);
 
-// How threads are started in one T3 project.
+const LinearSettings = z.object({
+  // Linear team key, e.g. "ENG".
+  team: z.string(),
+  // Linear `IssueFilter`, AND-ed with the team filter. Only matching issues get a thread.
+  filter: IssueFilter.optional(),
+  onLaunch: z
+    .object({
+      // Workflow state name to move the issue to once its thread is started.
+      moveToState: z.string().optional(),
+      comment: z.boolean().default(true),
+    })
+    .prefault({}),
+});
+
+// Which Linear issues go to one T3 project, and how their threads are started.
 const ProjectSettings = z.object({
+  linear: LinearSettings,
   workspace: WorkspaceStrategy.default({ type: "worktree", baseRef: "main", startFromOrigin: true }),
   runtimeMode: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]).default("full-access"),
   interactionMode: z.enum(["default", "plan"]).default("default"),
@@ -32,60 +47,24 @@ const ProjectSettings = z.object({
   promptTemplate: z.string().optional(),
 });
 
-const TeamMapping = z.object({
-  // Linear team key, e.g. "ENG".
-  team: z.string(),
-  // Key into `projects`.
-  project: z.string(),
-  // Extra filter for this team, AND-ed with the global filter.
-  filter: IssueFilter.optional(),
+const Config = z.object({
+  pollIntervalSeconds: z.number().int().min(10).default(60),
+  // Caps how many threads are started per poll so a broad filter can't flood T3.
+  maxLaunchesPerPoll: z.number().int().min(1).default(5),
+  stateFile: z.string().default("./state.json"),
+  t3: z
+    .object({
+      url: z.string().url().default("http://127.0.0.1:3773"),
+      // Optional public web URL, used to link the thread in the Linear comment.
+      webUrl: z.string().url().optional(),
+    })
+    .prefault({}),
+  // Keyed by T3 project id, title, or workspace root path.
+  projects: z.record(z.string(), ProjectSettings).refine((p) => Object.keys(p).length > 0, "Define at least one project"),
 });
-
-const Config = z
-  .object({
-    pollIntervalSeconds: z.number().int().min(10).default(60),
-    // Caps how many threads are started per poll so a broad filter can't flood T3.
-    maxLaunchesPerPoll: z.number().int().min(1).default(5),
-    stateFile: z.string().default("./state.json"),
-    t3: z
-      .object({
-        url: z.string().url().default("http://127.0.0.1:3773"),
-        // Optional public web URL, used to link the thread in the Linear comment.
-        webUrl: z.string().url().optional(),
-      })
-      .prefault({}),
-    linear: z
-      .object({
-        // Applied to every team, AND-ed with the team's own filter.
-        filter: IssueFilter.optional(),
-        onLaunch: z
-          .object({
-            // Workflow state name to move the issue to once its thread is started.
-            moveToState: z.string().optional(),
-            comment: z.boolean().default(true),
-          })
-          .prefault({}),
-      })
-      .prefault({}),
-    // Keyed by T3 project id, title, or workspace root path.
-    projects: z.record(z.string(), ProjectSettings),
-    teams: z.array(TeamMapping).min(1),
-  })
-  .superRefine((config, ctx) => {
-    config.teams.forEach((mapping, i) => {
-      if (!(mapping.project in config.projects)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["teams", i, "project"],
-          message: `"${mapping.project}" is not defined in "projects"`,
-        });
-      }
-    });
-  });
 
 export type Config = z.infer<typeof Config>;
 export type ProjectSettings = z.infer<typeof ProjectSettings>;
-export type TeamMapping = z.infer<typeof TeamMapping>;
 export type ModelSelection = z.infer<typeof ModelSelection>;
 
 export const DEFAULT_PROMPT = `Work on Linear issue {identifier}: {title}

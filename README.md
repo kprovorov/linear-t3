@@ -4,9 +4,7 @@
 
 A small daemon that polls Linear for issues that match your filters and starts a [T3 Code](https://t3.codes) thread for each one. It runs on the same machine as the T3 Code server.
 
-- Each Linear team maps to one T3 project. You can give the project as its id, its title, or its workspace path. Several teams can share a project.
-- Each team gets the global Linear `IssueFilter` AND its own team filter.
-- Thread settings are per project: workspace (a git worktree per issue on the issue's Linear branch name, or the main checkout), runtime mode, interaction mode, model, and prompt template.
+- Everything is configured per T3 project: the Linear team, the Linear issue filter, what to do in Linear after launch, and how threads start. Thread options are the workspace (a git worktree per issue on the issue's Linear branch name, or the main checkout), runtime mode, interaction mode, model, and prompt template.
 - After a thread starts, the daemon can comment on the issue with the thread link and move the issue to another workflow state.
 - Launched issues are recorded in `state.json`, so restarting the daemon never starts the same issue twice.
 
@@ -16,7 +14,7 @@ It is written in TypeScript, uses the official [`@linear/sdk`](https://github.co
 
 ```sh
 npm install
-cp config.example.json config.json   # edit teams, projects and filters
+cp config.example.json config.json   # edit projects, teams and filters
 cp .env.example .env                  # fill in the tokens
 t3 auth session issue --label linear-t3 --ttl 365d --token-only   # paste into T3_TOKEN
 ```
@@ -39,16 +37,16 @@ See `config.example.json`. The main keys:
 | `maxLaunchesPerPoll` | Maximum number of threads started per poll. Default `5`. |
 | `t3.url` | T3 server URL. Default `http://127.0.0.1:3773`. |
 | `t3.webUrl` | Optional public T3 web URL. When set, the Linear comment includes a clickable thread link. |
-| `linear.filter` | Linear [`IssueFilter`](https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter) applied to every team. |
-| `linear.onLaunch.comment` | Comment on the issue with the thread link. Default `true`. |
-| `linear.onLaunch.moveToState` | Workflow state name to move the issue to once its thread starts. |
-| `projects` | Thread settings for each T3 project. The key is the T3 project id, title or workspace path. |
-| `teams[]` | One entry per Linear team: `team` (team key), `project` (a key of `projects`), and an optional `filter`. |
+| `projects` | One entry per T3 project. The key is the T3 project id, title or workspace path. |
 
 Project settings:
 
 | Key | Default | Description |
 | --- | --- | --- |
+| `linear.team` | required | Linear team key, for example `ENG`. |
+| `linear.filter` | none | A Linear [`IssueFilter`](https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter). It is combined with the team filter, and only issues that match get a thread. |
+| `linear.onLaunch.comment` | `true` | Comment on the issue with the thread link. |
+| `linear.onLaunch.moveToState` | none | Workflow state name to move the issue to once its thread starts. |
 | `workspace` | `{ "type": "worktree", "baseRef": "main", "startFromOrigin": true }` | Or `{ "type": "root" }` to use the project's main checkout. |
 | `runtimeMode` | `full-access` | `approval-required`, `auto-accept-edits`, `auto` or `full-access`. |
 | `interactionMode` | `default` | `default` or `plan`. |
