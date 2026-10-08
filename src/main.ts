@@ -183,7 +183,8 @@ async function poll(config: Config, linear: LinearClient, state: StateStore, t3T
   const pending = new Map<string, Candidate>();
   for (const [projectRef, settings] of Object.entries(config.projects)) {
     const filter = { and: [{ team: { key: { eq: settings.linear.team } } }, settings.linear.filter ?? {}] };
-    const issues = await listIssues(linear, filter);
+    if (shutdown.signal.aborted) return;
+    const issues = await listIssues(linear, filter, shutdown.signal);
     for (const issue of issues) {
       if (state.has(issue.id) || (launchFailures.get(issue.id)?.retryAt ?? 0) > now) continue;
       // An issue matched by several projects gets a single thread, in the first matching project.

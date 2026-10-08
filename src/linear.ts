@@ -2,10 +2,17 @@ import { LinearClient, LinearDocument, type Issue } from "@linear/sdk";
 
 export { LinearClient, type Issue };
 
-export async function listIssues(client: LinearClient, filter: LinearDocument.IssueFilter): Promise<Issue[]> {
+export async function listIssues(
+  client: LinearClient,
+  filter: LinearDocument.IssueFilter,
+  signal: AbortSignal,
+): Promise<Issue[]> {
   const issues = await client.issues({ filter, first: 50, orderBy: LinearDocument.PaginationOrderBy.CreatedAt });
   // fetchNext() appends the next page to `nodes`.
-  while (issues.pageInfo.hasNextPage) await issues.fetchNext();
+  while (issues.pageInfo.hasNextPage) {
+    signal.throwIfAborted();
+    await issues.fetchNext();
+  }
   return issues.nodes;
 }
 
