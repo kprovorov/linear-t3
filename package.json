@@ -1,0 +1,23 @@
+{
+  "name": "linear-t3",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Daemon that polls Linear issues and launches T3 Code threads for them",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "once": "node src/main.ts --once",
+    "dry-run": "node src/main.ts --once --dry-run",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^5.9.3"
+  }
+}
