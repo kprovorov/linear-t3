@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { DEFAULT_PROMPT, loadConfig, requireEnv, type Config, type ProjectSettings } from "./config.ts";
 import { LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
-import { StateStore } from "./state.ts";
+import { StateStore, type LaunchRecord } from "./state.ts";
 import { T3Client, type T3Project, type WorkspaceStrategy } from "./t3.ts";
 
 const { values: args } = parseArgs({
@@ -29,12 +29,17 @@ function renderPrompt(template: string, issue: Issue): string {
 }
 
 function findProject(projects: T3Project[], ref: string): T3Project {
-  const project = projects.find((p) => p.id === ref || p.title === ref || p.workspaceRoot === ref);
-  if (!project) {
-    const known = projects.map((p) => `"${p.title}" (${p.workspaceRoot})`).join(", ");
-    throw new Error(`No T3 project matches "${ref}". Known projects: ${known}`);
+  const exact = projects.find((p) => p.id === ref || p.workspaceRoot === ref);
+  if (exact) return exact;
+  // Titles aren't unique; launching into the wrong workspace is worse than failing.
+  const byTitle = projects.filter((p) => p.title === ref);
+  if (byTitle.length === 1) return byTitle[0]!;
+  if (byTitle.length > 1) {
+    const roots = byTitle.map((p) => p.workspaceRoot).join(", ");
+    throw new Error(`Several T3 projects are titled "${ref}" (${roots}); use the id or workspace path instead`);
   }
-  return project;
+  const known = projects.map((p) => `"${p.title}" (${p.workspaceRoot})`).join(", ");
+  throw new Error(`No T3 project matches "${ref}". Known projects: ${known}`);
 }
 
 function workspaceFor(settings: ProjectSettings, issue: Issue): WorkspaceStrategy {
@@ -76,41 +81,94 @@ async function launchIssue(
     message: renderPrompt(settings.promptTemplate ?? DEFAULT_PROMPT, issue),
   });
   // Record before touching Linear: a failed Linear update must never cause a duplicate thread.
-  await state.record(issue.id, { identifier: issue.identifier, threadId, launchedAt: new Date().toISOString() });
-  log(`${issue.identifier}: started T3 thread ${threadId} in "${project.title}"`);
-
   const { onLaunch } = settings.linear;
-  try {
-    if (onLaunch.comment) {
-      const link = await threadLink(config, threadId);
-      await linear.createComment({ issueId: issue.id, body: `Started a T3 Code thread for this issue: ${link}` });
+  const record: LaunchRecord = {
+    identifier: issue.identifier,
+    threadId,
+    launchedAt: new Date().toISOString(),
+    pendingActions: {
+      ...(onLaunch.comment && { comment: true }),
+      ...(onLaunch.moveToState && { moveToState: onLaunch.moveToState }),
+    },
+  };
+  await state.record(issue.id, record);
+  log(`${issue.identifier}: started T3 thread ${threadId} in "${project.title}"`);
+  await runPendingActions(issue.id, record, { config, linear, state }, issue);
+}
+
+/** Applies a launched issue's outstanding Linear updates, keeping any that fail for the next poll. */
+async function runPendingActions(
+  issueId: string,
+  record: LaunchRecord,
+  ctx: { config: Config; linear: LinearClient; state: StateStore },
+  issue?: Issue,
+): Promise<void> {
+  const { config, linear, state } = ctx;
+  const pendingActions = { ...record.pendingActions };
+  if (pendingActions.comment) {
+    try {
+      const link = await threadLink(config, record.threadId);
+      await linear.createComment({ issueId, body: `Started a T3 Code thread for this issue: ${link}` });
+      delete pendingActions.comment;
+    } catch (error) {
+      log(`${record.identifier}: commenting on Linear failed, will retry: ${(error as Error).message}`);
     }
-    if (onLaunch.moveToState) await moveToState(linear, issue, onLaunch.moveToState);
-  } catch (error) {
-    log(`${issue.identifier}: thread started but updating Linear failed: ${(error as Error).message}`);
   }
+  if (pendingActions.moveToState) {
+    try {
+      await moveToState(linear, issue ?? (await linear.issue(issueId)), pendingActions.moveToState);
+      delete pendingActions.moveToState;
+    } catch (error) {
+      log(`${record.identifier}: moving Linear issue failed, will retry: ${(error as Error).message}`);
+    }
+  }
+  await state.record(issueId, { ...record, pendingActions });
+}
+
+// Issues whose launch failed are skipped until `retryAt`, so they can't starve the rest of the queue.
+const launchFailures = new Map<string, { count: number; retryAt: number }>();
+
+function recordLaunchFailure(issueId: string): void {
+  const count = (launchFailures.get(issueId)?.count ?? 0) + 1;
+  const delayMs = Math.min(60_000 * 2 ** (count - 1), 60 * 60_000);
+  launchFailures.set(issueId, { count, retryAt: Date.now() + delayMs });
 }
 
 async function poll(config: Config, linear: LinearClient, state: StateStore, t3Token: string, dryRun: boolean) {
+  if (!dryRun) {
+    for (const [issueId, record] of state.withPendingActions()) {
+      await runPendingActions(issueId, record, { config, linear, state });
+    }
+  }
+
+  const now = Date.now();
   const pending: Candidate[] = [];
   for (const [projectRef, settings] of Object.entries(config.projects)) {
     const filter = { and: [{ team: { key: { eq: settings.linear.team } } }, settings.linear.filter ?? {}] };
     const issues = await listIssues(linear, filter);
-    for (const issue of issues) if (!state.has(issue.id)) pending.push({ issue, projectRef, settings });
+    for (const issue of issues) {
+      if (state.has(issue.id) || (launchFailures.get(issue.id)?.retryAt ?? 0) > now) continue;
+      pending.push({ issue, projectRef, settings });
+    }
   }
   if (pending.length === 0) return;
 
-  const batch = pending.slice(0, config.maxLaunchesPerPoll);
-  log(`${pending.length} new issue(s), launching ${batch.length}: ${batch.map((p) => p.issue.identifier).join(", ")}`);
+  log(`${pending.length} new issue(s): ${pending.map((p) => p.issue.identifier).join(", ")}`);
   if (dryRun) return;
 
   const t3 = await T3Client.connect(config.t3.url, t3Token);
   try {
     const projects = await t3.listProjects();
-    for (const candidate of batch) {
+    let launched = 0;
+    // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
+    for (const candidate of pending) {
+      if (launched >= config.maxLaunchesPerPoll) break;
       try {
         await launchIssue(candidate, findProject(projects, candidate.projectRef), { config, t3, linear, state });
+        launchFailures.delete(candidate.issue.id);
+        launched++;
       } catch (error) {
+        recordLaunchFailure(candidate.issue.id);
         log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
       }
     }

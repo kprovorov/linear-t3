@@ -1,9 +1,16 @@
 import { readFile, rename, writeFile } from "node:fs/promises";
 
+export interface PendingActions {
+  comment?: boolean;
+  moveToState?: string;
+}
+
 export interface LaunchRecord {
   identifier: string;
   threadId: string;
   launchedAt: string;
+  // Linear updates still to be done for this issue; retried every poll until they succeed.
+  pendingActions?: PendingActions;
 }
 
 /** Remembers which Linear issues already have a T3 thread, so restarts never relaunch them. */
@@ -27,7 +34,12 @@ export class StateStore {
     return issueId in this.launched;
   }
 
+  withPendingActions(): [string, LaunchRecord][] {
+    return Object.entries(this.launched).filter(([, r]) => r.pendingActions);
+  }
+
   async record(issueId: string, record: LaunchRecord): Promise<void> {
+    if (record.pendingActions && Object.keys(record.pendingActions).length === 0) delete record.pendingActions;
     this.launched[issueId] = record;
     const tmp = `${this.path}.tmp`;
     await writeFile(tmp, JSON.stringify({ launched: this.launched }, null, 2));

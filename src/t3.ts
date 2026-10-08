@@ -140,6 +140,8 @@ export class T3Client {
   }
 
   private interrupt(requestId: string): void {
+    // Settle the call so its timeout timer is cleared.
+    this.pending.get(requestId)?.resolve(undefined);
     this.pending.delete(requestId);
     this.send({ _tag: "Interrupt", requestId, interruptors: [] });
   }
