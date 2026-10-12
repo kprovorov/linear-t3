@@ -13,10 +13,10 @@ It is written in TypeScript, uses the official [`@linear/sdk`](https://github.co
 ## Setup
 
 ```sh
-npm install
+pnpm install
 cp config.example.json config.json   # edit projects, teams and filters
-npm run cli connect t3                # issues a T3 token, checks it and saves it to .env
-npm run cli connect linear            # asks for a Linear API key, checks it and saves it to .env
+pnpm cli connect t3                  # issues a T3 token, checks it and saves it to .env
+pnpm cli connect linear              # asks for a Linear API key, checks it and saves it to .env
 ```
 
 `connect t3` runs `t3 auth session issue` for you, checks the token against the T3 server at `t3.url` from `config.json` (default `http://127.0.0.1:3773`) and saves it as `T3_TOKEN` in `./.env` only if the check passes. If the saved token still works, it asks before replacing it. The T3 server has to be running and the `t3` CLI has to be on your `PATH`. To do it by hand instead, run `t3 auth session issue --label linear-t3 --ttl 365d --token-only` and paste the token into `T3_TOKEN`.
@@ -25,21 +25,22 @@ npm run cli connect linear            # asks for a Linear API key, checks it and
 
 To set the key up by hand instead, `cp .env.example .env` and paste the key into `LINEAR_API_KEY`.
 
-Check the CLI works with `npm run cli -- --version`.
+Check the CLI works with `pnpm cli --version`.
 
 Try it without starting any threads:
 
 ```sh
-npm run dry-run    # lists the issues it would launch
-npm run once       # one real poll, then exit
-npm start          # run continuously
+pnpm dry-run    # lists the issues it would launch
+pnpm once       # one real poll, then exit
+pnpm start      # run continuously
 ```
 
-The project uses [Vite+](https://viteplus.dev) for formatting, linting and type checking. `npm install` installs it locally, so run it through `npx`:
+The project uses [Vite+](https://viteplus.dev) for formatting, linting, type checking and tests:
 
 ```sh
-npx vp check         # format check, lint and type check
-npx vp check --fix   # apply formatting and lint fixes
+pnpm check          # format check, lint and type check
+pnpm check --fix    # apply formatting and lint fixes
+pnpm test           # run the tests
 ```
 
 ## Configuration
@@ -89,4 +90,4 @@ T3 Code has no public API for creating threads, so this daemon uses the same Web
 3. It calls `orchestration.subscribeShell`, takes the project list from the first snapshot, then interrupts the subscription.
 4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message. The command ID, thread ID and message ID are all derived from the Linear issue ID. T3 keeps a receipt for each command ID, so if the response to a launch is lost and the daemon retries with the same command ID, T3 returns the thread the first attempt created instead of creating a second one. The daemon does not send `reuseExistingThread`: in protocol 2 it means "start a run in an existing empty thread", and sending it for a new thread fails with `ProjectionStoreThreadNotFoundError`.
 
-These RPCs are internal and could change in a future T3 Code release. Run `npm run once` after updating T3 to confirm launches still work. The client is isolated in `src/t3.ts`.
+These RPCs are internal and could change in a future T3 Code release. Run `pnpm once` after updating T3 to confirm launches still work. The client is isolated in `src/t3.ts`.
