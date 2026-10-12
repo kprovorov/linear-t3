@@ -8,10 +8,12 @@
     "start": "node --env-file-if-exists=.env src/main.ts",
     "once": "node --env-file-if-exists=.env src/main.ts --once",
     "dry-run": "node --env-file-if-exists=.env src/main.ts --once --dry-run",
+    "cli": "node src/cli.ts",
     "typecheck": "tsc"
   },
   "dependencies": {
     "@linear/sdk": "^97.1.0",
+    "commander": "^15.0.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
