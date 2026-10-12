@@ -19,6 +19,8 @@ cp .env.example .env                  # fill in the tokens
 t3 auth session issue --label linear-t3 --ttl 365d --token-only   # paste into T3_TOKEN
 ```
 
+Check the CLI works with `npm run cli -- --version`.
+
 Try it without starting any threads:
 
 ```sh
