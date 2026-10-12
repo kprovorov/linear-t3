@@ -158,8 +158,8 @@ describe("connect", () => {
 
   test("fails with 'not implemented yet' for a service that isn't plugged in", async () => {
     const second = fakeService(["b"], { b: { status: "valid" } });
-    await expect(connect([{ name: "T3" }, second], env, fakeUi())).rejects.toThrow(
-      new ConnectError("Connecting T3 is not implemented yet"),
+    await expect(connect([{ name: "Linear" }, second], env, fakeUi())).rejects.toThrow(
+      new ConnectError("Connecting Linear is not implemented yet"),
     );
     expect(second.obtained).toBe(0);
   });

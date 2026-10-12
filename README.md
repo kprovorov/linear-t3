@@ -15,9 +15,11 @@ It is written in TypeScript, uses the official [`@linear/sdk`](https://github.co
 ```sh
 npm install
 cp config.example.json config.json   # edit projects, teams and filters
-npm run cli connect linear           # asks for a Linear API key, checks it and saves it to .env
-t3 auth session issue --label linear-t3 --ttl 365d --token-only   # paste into T3_TOKEN in .env
+npm run cli connect t3                # issues a T3 token, checks it and saves it to .env
+npm run cli connect linear            # asks for a Linear API key, checks it and saves it to .env
 ```
+
+`connect t3` runs `t3 auth session issue` for you, checks the token against the T3 server at `t3.url` from `config.json` (default `http://127.0.0.1:3773`) and saves it as `T3_TOKEN` in `./.env` only if the check passes. If the saved token still works, it asks before replacing it. The T3 server has to be running and the `t3` CLI has to be on your `PATH`. To do it by hand instead, run `t3 auth session issue --label linear-t3 --ttl 365d --token-only` and paste the token into `T3_TOKEN`.
 
 `connect linear` asks for a Linear personal API key (Linear → Settings → Security & access → Personal API keys), checks it against Linear and saves it as `LINEAR_API_KEY` in `./.env` only if the check passes. It creates `.env` from `.env.example` if needed, writes it with mode `0600` and leaves every other line alone. If the saved key still works, it asks before replacing it.
 
