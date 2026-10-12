@@ -1,7 +1,12 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vite-plus/test";
 
-const cliPath = new URL("./cli.ts", import.meta.url).pathname;
+const cliPath = fileURLToPath(new URL("./cli.ts", import.meta.url));
+const { version } = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
 
 function runCli(...args: string[]) {
   const { status, stdout, stderr } = spawnSync(process.execPath, [cliPath, ...args], {
@@ -13,7 +18,7 @@ function runCli(...args: string[]) {
 describe("cli", () => {
   test.each(["--version", "-V"])("%s prints the package version and exits 0", (flag) => {
     const result = runCli(flag);
-    expect(result).toEqual({ status: 0, stdout: "0.1.0\n", stderr: "" });
+    expect(result).toEqual({ status: 0, stdout: `${version}\n`, stderr: "" });
   });
 
   test.each([{ args: [] }, { args: ["--help"] }, { args: ["-h"] }])(
