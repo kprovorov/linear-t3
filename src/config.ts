@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 
+export const DEFAULT_T3_URL = "http://127.0.0.1:3773";
+
 // A raw Linear `IssueFilter` object, passed through to the Linear API as-is.
 // See https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter
 const IssueFilter = z.record(z.string(), z.unknown());
@@ -86,7 +88,7 @@ const Config = z
     stateFile: z.string().default("./state.json"),
     t3: z
       .object({
-        url: z.string().url().default("http://127.0.0.1:3773"),
+        url: z.string().url().default(DEFAULT_T3_URL),
         // Optional public web URL, used to link the thread in the Linear comment.
         webUrl: z.string().url().optional(),
       })

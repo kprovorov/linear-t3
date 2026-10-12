@@ -11,17 +11,22 @@ import {
   type Ui,
   connect,
 } from "./connect.ts";
+import { t3BaseUrl, t3Service } from "./connect-t3.ts";
 import { EnvFile } from "./env-file.ts";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   version: string;
 };
 
+/** The config file the daemon would use: `CONFIG_PATH` from the environment or `.env`. */
+const configPath = (env: EnvFile) =>
+  resolve(process.env.CONFIG_PATH ?? env.get("CONFIG_PATH") ?? "config.json");
+
 /** Every service `connect` knows about, in the order plain `connect` runs them. */
 const services = {
-  t3: { name: "T3" },
-  linear: { name: "Linear" },
-} satisfies Record<string, Service | PendingService>;
+  t3: async (env) => t3Service({ baseUrl: await t3BaseUrl(configPath(env)) }),
+  linear: async () => ({ name: "Linear" }),
+} satisfies Record<string, (env: EnvFile) => Promise<Service | PendingService>>;
 
 type ServiceName = keyof typeof services;
 const serviceNames = Object.keys(services) as ServiceName[];
@@ -58,7 +63,9 @@ async function runConnect(service: ServiceName | undefined): Promise<void> {
     process.exit(1);
   }
   const env = new EnvFile(resolve(".env"), resolve(".env.example"));
-  const selected = (service ? [service] : serviceNames).map((name) => services[name]);
+  const selected = await Promise.all(
+    (service ? [service] : serviceNames).map((name) => services[name](env)),
+  );
 
   clack.intro("linear-t3 connect");
   try {
