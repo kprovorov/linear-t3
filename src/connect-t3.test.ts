@@ -131,7 +131,11 @@ describe("issueT3Token", () => {
 describe("t3Service", () => {
   const ui = (replace = false): Ui => ({
     confirm: async () => replace,
+    password: async () => {
+      throw new Error("T3 never asks for a token");
+    },
     spin: (_message, work) => work(),
+    success: () => {},
     warn: () => {},
   });
 

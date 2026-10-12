@@ -13,9 +13,24 @@ import {
 } from "./connect.ts";
 import { t3BaseUrl, t3Service } from "./connect-t3.ts";
 import { EnvFile } from "./env-file.ts";
+import { checkLinear } from "./token-check.ts";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   version: string;
+};
+
+const linear: Service = {
+  name: "Linear",
+  envKey: "LINEAR_API_KEY",
+  obtain: (ui) =>
+    ui.password(
+      "Linear API key (create one in Linear → Settings → Security & access → Personal API keys)",
+    ),
+  check: checkLinear,
+  // A saved key that can't be checked may still be fine, so don't ask to replace it. A new key
+  // that fails is most likely a typo, so keep asking until one passes or the user cancels.
+  onFailure: (step, result) =>
+    step === "existing" && result.status === "unreachable" ? "abort" : "obtain",
 };
 
 /** The config file the daemon would use: `CONFIG_PATH` from the environment or `.env`. */
@@ -25,7 +40,7 @@ const configPath = (env: EnvFile) =>
 /** Every service `connect` knows about, in the order plain `connect` runs them. */
 const services = {
   t3: async (env) => t3Service({ baseUrl: await t3BaseUrl(configPath(env)) }),
-  linear: async () => ({ name: "Linear" }),
+  linear: async () => linear,
 } satisfies Record<string, (env: EnvFile) => Promise<Service | PendingService>>;
 
 type ServiceName = keyof typeof services;
@@ -36,6 +51,14 @@ const clackUi: Ui = {
     const answer = await clack.confirm({ message, initialValue: false });
     if (clack.isCancel(answer)) throw new CancelledError();
     return answer;
+  },
+  async password(message) {
+    const answer = await clack.password({
+      message,
+      validate: (value) => (value?.trim() ? undefined : "Required"),
+    });
+    if (clack.isCancel(answer)) throw new CancelledError();
+    return answer.trim();
   },
   async spin(message, work) {
     const spinner = clack.spinner({ onCancel: () => process.exit(1) });
@@ -49,11 +72,12 @@ const clackUi: Ui = {
       throw error;
     }
   },
+  success: (message) => clack.log.success(message),
   warn: (message) => clack.log.warn(message),
 };
 
 function summary(outcome: Outcome): string {
-  const who = outcome.identity ? ` (${outcome.identity})` : "";
+  const who = outcome.identity ? `, authenticated as ${outcome.identity}` : "";
   return `${outcome.service}: ${outcome.action === "saved" ? "token saved" : "kept existing token"}${who}`;
 }
 
