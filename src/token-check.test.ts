@@ -43,9 +43,10 @@ describe("checkLinear", () => {
         },
       ],
     });
-    const result = await checkLinear("lin_api_bad");
-    expect(result).toEqual({ status: "unauthorized", message: expect.any(String) });
-    expect(result.status === "unauthorized" && result.message).toMatch(/^Linear rejected the key/);
+    expect(await checkLinear("lin_api_bad")).toEqual({
+      status: "unauthorized",
+      message: expect.stringMatching(/^Linear rejected the key/),
+    });
   });
 
   test("a network failure is unreachable", async () => {
@@ -56,8 +57,9 @@ describe("checkLinear", () => {
         throw new TypeError("fetch failed", { cause: new Error("getaddrinfo ENOTFOUND") });
       }),
     );
-    const result = await checkLinear("lin_api_good");
-    expect(result).toEqual({ status: "unreachable", message: expect.any(String) });
-    expect(result.status === "unreachable" && result.message).toMatch(/^Linear is not reachable/);
+    expect(await checkLinear("lin_api_good")).toEqual({
+      status: "unreachable",
+      message: expect.stringMatching(/^Linear is not reachable/),
+    });
   });
 });

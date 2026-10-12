@@ -29,8 +29,8 @@ function fakeUi(replace = false): Ui & { shown: string[] } {
     confirm: async () => replace,
     password: async () => "",
     spin: (_message, work) => work(),
-    success: (message) => shown.push(message),
-    warn: (message) => shown.push(message),
+    success: (message) => shown.push(`success: ${message}`),
+    warn: (message) => shown.push(`warn: ${message}`),
   };
 }
 
@@ -67,7 +67,7 @@ describe("connectService", () => {
     const ui = fakeUi();
     const service = fakeService(["new"], { new: { status: "valid", identity: "Ada" } });
     await connectService(service, env, ui);
-    expect(ui.shown).toEqual(["Authenticated as Ada"]);
+    expect(ui.shown).toEqual(["success: Authenticated as Ada"]);
   });
 
   test("keeps an existing valid token when the user declines to replace it", async () => {

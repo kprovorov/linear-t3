@@ -75,8 +75,9 @@ export async function connectService(service: Service, env: EnvFile, ui: Ui): Pr
       `Checking ${step === "existing" ? "saved" : "new"} ${service.name} token`,
       () => service.check(token),
     );
-    if (result.status === "valid" && result.identity)
+    if (result.status === "valid" && result.identity) {
       ui.success(`Authenticated as ${result.identity}`);
+    }
     return result;
   };
 

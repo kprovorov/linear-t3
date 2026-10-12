@@ -32,6 +32,8 @@ export async function checkLinear(apiKey: string): Promise<CheckResult> {
         message: `Linear is not reachable: ${rootMessage(error.raw)}`,
       };
     }
+    // Linear answered but neither accepted nor rejected the key (5xx, rate limit). A new key
+    // won't fix that any more than it fixes an outage, so report it the same way.
     return { status: "unreachable", message: `Linear check failed: ${error.message}` };
   }
 }

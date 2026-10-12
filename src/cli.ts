@@ -26,8 +26,10 @@ const linear: Service = {
       "Linear API key (create one in Linear → Settings → Security & access → Personal API keys)",
     ),
   check: checkLinear,
-  // A mistyped or revoked key is easy to fix, so keep asking until one passes or the user cancels.
-  onFailure: () => "obtain",
+  // A saved key that can't be checked may still be fine, so don't ask to replace it. A new key
+  // that fails is most likely a typo, so keep asking until one passes or the user cancels.
+  onFailure: (step, result) =>
+    step === "existing" && result.status === "unreachable" ? "abort" : "obtain",
 };
 
 /** Every service `connect` knows about, in the order plain `connect` runs them. */
