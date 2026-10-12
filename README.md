@@ -15,9 +15,13 @@ It is written in TypeScript, uses the official [`@linear/sdk`](https://github.co
 ```sh
 npm install
 cp config.example.json config.json   # edit projects, teams and filters
-cp .env.example .env                  # fill in the tokens
-t3 auth session issue --label linear-t3 --ttl 365d --token-only   # paste into T3_TOKEN
+npm run cli connect linear           # asks for a Linear API key, checks it and saves it to .env
+t3 auth session issue --label linear-t3 --ttl 365d --token-only   # paste into T3_TOKEN in .env
 ```
+
+`connect linear` asks for a Linear personal API key (Linear → Settings → Security & access → Personal API keys), checks it against Linear and saves it as `LINEAR_API_KEY` in `./.env` only if the check passes. It creates `.env` from `.env.example` if needed, writes it with mode `0600` and leaves every other line alone. If the saved key still works, it asks before replacing it.
+
+To set the key up by hand instead, `cp .env.example .env` and paste the key into `LINEAR_API_KEY`.
 
 Check the CLI works with `npm run cli -- --version`.
 

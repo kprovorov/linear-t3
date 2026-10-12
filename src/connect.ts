@@ -26,7 +26,10 @@ export interface Service {
 export interface Ui {
   /** Resolves to the answer; rejects with `CancelledError` if the user cancels. */
   confirm(message: string): Promise<boolean>;
+  /** Asks for a secret without echoing it; rejects with `CancelledError` if the user cancels. */
+  password(message: string): Promise<string>;
   spin<T>(message: string, work: () => Promise<T>): Promise<T>;
+  success(message: string): void;
   warn(message: string): void;
 }
 
@@ -67,11 +70,19 @@ export async function connectService(service: Service, env: EnvFile, ui: Ui): Pr
     ui.warn(message);
   };
 
+  const check = async (step: Step, token: string) => {
+    const result = await ui.spin(
+      `Checking ${step === "existing" ? "saved" : "new"} ${service.name} token`,
+      () => service.check(token),
+    );
+    if (result.status === "valid" && result.identity)
+      ui.success(`Authenticated as ${result.identity}`);
+    return result;
+  };
+
   const existing = env.get(service.envKey);
   if (existing !== undefined) {
-    const result = await ui.spin(`Checking saved ${service.name} token`, () =>
-      service.check(existing),
-    );
+    const result = await check("existing", existing);
     if (result.status !== "valid") {
       handleFailure("existing", result);
     } else if (!(await ui.confirm(`${service.name} token is already valid, replace it?`))) {
@@ -81,7 +92,7 @@ export async function connectService(service: Service, env: EnvFile, ui: Ui): Pr
 
   for (;;) {
     const token = await service.obtain(ui);
-    const result = await ui.spin(`Checking new ${service.name} token`, () => service.check(token));
+    const result = await check("new", token);
     if (result.status === "valid") {
       env.set({ [service.envKey]: token });
       return { service: service.name, action: "saved", identity: result.identity };
