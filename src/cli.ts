@@ -63,7 +63,9 @@ async function runConnect(service: ServiceName | undefined): Promise<void> {
   clack.intro("linear-t3 connect");
   try {
     const outcomes = await connect(selected, env, clackUi);
-    clack.outro([...outcomes.map(summary), `Saved to ${env.path}`].join("\n"));
+    const saved = outcomes.some((outcome) => outcome.action === "saved");
+    const where = saved ? `Saved to ${env.path}` : `${env.path} unchanged`;
+    clack.outro([...outcomes.map(summary), where].join("\n"));
   } catch (error) {
     if (error instanceof CancelledError) {
       clack.cancel("Cancelled");

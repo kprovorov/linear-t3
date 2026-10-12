@@ -48,11 +48,11 @@ export class CancelledError extends Error {
 
 const defaultOnFailure = (step: Step): FailureAction => (step === "existing" ? "obtain" : "abort");
 
-function describeFailure(service: Service, result: Failure): string {
+function describeFailure(name: string, result: Failure): string {
   if (result.message) return result.message;
   return result.status === "unauthorized"
-    ? `${service.name} rejected the token`
-    : `${service.name} is not reachable`;
+    ? `${name} rejected the token`
+    : `${name} is not reachable`;
 }
 
 /**
@@ -60,9 +60,9 @@ function describeFailure(service: Service, result: Failure): string {
  * keep it, otherwise get a new one and save it only once its check passes.
  */
 export async function connectService(service: Service, env: EnvFile, ui: Ui): Promise<Outcome> {
-  const onFailure = (step: Step, result: Failure) => {
+  const handleFailure = (step: Step, result: Failure) => {
     const action = service.onFailure?.(step, result) ?? defaultOnFailure(step);
-    const message = describeFailure(service, result);
+    const message = describeFailure(service.name, result);
     if (action === "abort") throw new ConnectError(message);
     ui.warn(message);
   };
@@ -73,7 +73,7 @@ export async function connectService(service: Service, env: EnvFile, ui: Ui): Pr
       service.check(existing),
     );
     if (result.status !== "valid") {
-      onFailure("existing", result);
+      handleFailure("existing", result);
     } else if (!(await ui.confirm(`${service.name} token is already valid, replace it?`))) {
       return { service: service.name, action: "kept", identity: result.identity };
     }
@@ -86,7 +86,7 @@ export async function connectService(service: Service, env: EnvFile, ui: Ui): Pr
       env.set({ [service.envKey]: token });
       return { service: service.name, action: "saved", identity: result.identity };
     }
-    onFailure("new", result);
+    handleFailure("new", result);
   }
 }
 
