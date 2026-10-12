@@ -12,6 +12,7 @@
     "typecheck": "tsc"
   },
   "dependencies": {
+    "@clack/prompts": "^1.8.1",
     "@linear/sdk": "^97.1.0",
     "commander": "^15.0.0",
     "zod": "^4.6.5"
