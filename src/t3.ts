@@ -70,6 +70,25 @@ interface ShellSnapshot {
   archivedThreads?: { id: string }[];
 }
 
+/** Asks T3 for a one-time websocket ticket: the first step of authenticating a bearer token. */
+export function requestWebsocketTicket(
+  baseUrl: string,
+  token: string,
+  signal: AbortSignal,
+  fetchFn: typeof fetch = fetch,
+): Promise<Response> {
+  return fetchFn(new URL("/api/auth/websocket-ticket", baseUrl), {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+    signal,
+  });
+}
+
+/** An error message for a ticket response that wasn't a success, with the start of its body. */
+export async function describeTicketFailure(res: Response): Promise<string> {
+  return `T3 websocket ticket request failed (${res.status}): ${(await res.text()).slice(0, 300)}`;
+}
+
 export class T3Client {
   private readonly ws: WebSocket;
   private readonly pending = new Map<string, Pending>();
@@ -90,16 +109,12 @@ export class T3Client {
 
   /** Connects to the T3 server. `signal` aborts the connection attempt. */
   static async connect(baseUrl: string, token: string, signal: AbortSignal): Promise<T3Client> {
-    const res = await fetch(new URL("/api/auth/websocket-ticket", baseUrl), {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.any([signal, AbortSignal.timeout(CONNECT_TIMEOUT_MS)]),
-    });
-    if (!res.ok) {
-      throw new Error(
-        `T3 websocket ticket request failed (${res.status}): ${(await res.text()).slice(0, 300)}`,
-      );
-    }
+    const res = await requestWebsocketTicket(
+      baseUrl,
+      token,
+      AbortSignal.any([signal, AbortSignal.timeout(CONNECT_TIMEOUT_MS)]),
+    );
+    if (!res.ok) throw new Error(await describeTicketFailure(res));
     const { ticket } = (await res.json()) as { ticket: string };
 
     const url = new URL("/ws", baseUrl);

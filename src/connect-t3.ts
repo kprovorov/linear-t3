@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { DEFAULT_T3_URL } from "./config.ts";
 import { type CheckResult, ConnectError, type Service } from "./connect.ts";
+import { describeTicketFailure, requestWebsocketTicket } from "./t3.ts";
 
 const CHECK_TIMEOUT_MS = 10_000;
 const ISSUE_ARGS = "auth session issue --label linear-t3 --ttl 365d --token-only".split(" ");
@@ -19,21 +20,23 @@ export async function checkT3Token(
 ): Promise<CheckResult> {
   let res: Response;
   try {
-    res = await fetchFn(new URL("/api/auth/websocket-ticket", baseUrl), {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
-    });
+    res = await requestWebsocketTicket(
+      baseUrl,
+      token,
+      AbortSignal.timeout(CHECK_TIMEOUT_MS),
+      fetchFn,
+    );
   } catch {
-    return { status: "unreachable", message: `T3 not reachable at ${baseUrl}, is it running?` };
+    return { status: "unreachable", message: notReachable(baseUrl) };
   }
   if (res.ok) return { status: "valid" };
   if (res.status === 401 || res.status === 403) {
     return { status: "unauthorized", message: `T3 at ${baseUrl} rejected the token` };
   }
-  const body = (await res.text()).slice(0, 200);
-  throw new ConnectError(`T3 websocket ticket request failed (${res.status}): ${body}`);
+  throw new ConnectError(await describeTicketFailure(res));
 }
+
+const notReachable = (baseUrl: string) => `T3 not reachable at ${baseUrl}, is it running?`;
 
 const T3Url = z.object({ t3: z.object({ url: z.string().url() }) });
 
@@ -89,9 +92,12 @@ export function t3Service({
     envKey: "T3_TOKEN",
     async obtain(ui) {
       // Probe with no token first, so a down server doesn't leave a fresh 365-day session behind.
-      const probe = await ui.spin(`Checking T3 at ${baseUrl}`, () => check(""));
+      // Any answer at all means the server is up; only a failure to reach it matters here.
+      const probe = await ui.spin(`Checking T3 at ${baseUrl}`, () =>
+        check("").catch((): CheckResult => ({ status: "unauthorized" })),
+      );
       if (probe.status === "unreachable") {
-        throw new ConnectError(probe.message ?? `T3 not reachable at ${baseUrl}, is it running?`);
+        throw new ConnectError(probe.message ?? notReachable(baseUrl));
       }
       return ui.spin("Issuing a T3 token with `t3 auth session issue`", issue);
     },

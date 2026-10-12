@@ -135,15 +135,19 @@ describe("t3Service", () => {
     warn: () => {},
   });
 
-  /** A T3 server that answers each token per `results` (anything else is unauthorized). */
-  function setup(results: Record<string, CheckResult>, savedToken?: string) {
+  /** A T3 server that answers each token per `results` (anything else is unauthorized); an Error is thrown. */
+  function setup(results: Record<string, CheckResult | Error>, savedToken?: string) {
     const dir = mkdtempSync(join(tmpdir(), "connect-t3-"));
     const env = new EnvFile(join(dir, ".env"), join(dir, ".env.example"));
     if (savedToken) writeFileSync(env.path, `T3_TOKEN=${savedToken}\n`);
     let issued = 0;
     const service = t3Service({
       baseUrl: BASE_URL,
-      check: async (token) => results[token] ?? { status: "unauthorized" },
+      check: async (token) => {
+        const result = results[token] ?? { status: "unauthorized" };
+        if (result instanceof Error) throw result;
+        return result;
+      },
       issue: async () => `new-${++issued}`,
     });
     return { env, service, issued: () => issued, saved: () => env.get("T3_TOKEN") };
@@ -180,6 +184,15 @@ describe("t3Service", () => {
     const t = setup({ old: { status: "valid" } }, "old");
     expect(await connectService(t.service, t.env, ui())).toMatchObject({ action: "kept" });
     expect(t.issued()).toBe(0);
+  });
+
+  test("issues a token when T3 answers the no-token probe with an unexpected status", async () => {
+    const t = setup({
+      "": new ConnectError("T3 websocket ticket request failed (400)"),
+      "new-1": { status: "valid" },
+    });
+    await connectService(t.service, t.env, ui());
+    expect(t.saved()).toBe("new-1");
   });
 
   test("a newly issued token that is rejected aborts without saving", async () => {
