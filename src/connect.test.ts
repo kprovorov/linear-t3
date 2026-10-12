@@ -21,12 +21,16 @@ beforeEach(() => {
 
 const envContents = () => readFileSync(env.path, "utf8");
 
-/** A UI that answers every confirm with `replace`. */
-function fakeUi(replace = false): Ui {
+/** A UI that answers every confirm with `replace` and records what it shows. */
+function fakeUi(replace = false): Ui & { shown: string[] } {
+  const shown: string[] = [];
   return {
+    shown,
     confirm: async () => replace,
+    password: async () => "",
     spin: (_message, work) => work(),
-    warn: () => {},
+    success: (message) => shown.push(`success: ${message}`),
+    warn: (message) => shown.push(`warn: ${message}`),
   };
 }
 
@@ -57,6 +61,13 @@ describe("connectService", () => {
     const outcome = await connectService(service, env, fakeUi());
     expect(outcome).toEqual({ service: "Fake", action: "saved", identity: "Ada" });
     expect(envContents()).toBe("FAKE_TOKEN=new\n");
+  });
+
+  test("shows who a passing token authenticated as", async () => {
+    const ui = fakeUi();
+    const service = fakeService(["new"], { new: { status: "valid", identity: "Ada" } });
+    await connectService(service, env, ui);
+    expect(ui.shown).toEqual(["success: Authenticated as Ada"]);
   });
 
   test("keeps an existing valid token when the user declines to replace it", async () => {
