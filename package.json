@@ -9,7 +9,9 @@
     "once": "node --env-file-if-exists=.env src/main.ts --once",
     "dry-run": "node --env-file-if-exists=.env src/main.ts --once --dry-run",
     "cli": "node src/cli.ts",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "check": "vp check",
+    "test": "vp test"
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",
@@ -22,10 +24,8 @@
     "typescript": "^5.9.3",
     "vite-plus": "1.1.0"
   },
-  "overrides": {
-    "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0"
-  },
   "engines": {
     "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
-  }
+  },
+  "packageManager": "pnpm@12.11.2"
 }
