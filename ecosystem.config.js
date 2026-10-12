@@ -6,6 +6,8 @@ export const apps = [
     script: "src/main.ts",
     cwd: import.meta.dirname,
     // Node loads .env itself and strips TypeScript types natively; no build step.
+    // pm2 runs .ts scripts with Bun when it's installed, so pin Node.
+    interpreter: "node",
     node_args: "--env-file=.env",
     autorestart: true,
     restart_delay: 10_000,

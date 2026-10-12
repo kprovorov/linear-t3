@@ -2,6 +2,22 @@ import { LinearClient, LinearDocument, type Issue } from "@linear/sdk";
 
 export { LinearClient, type Issue, type LinearDocument };
 
+const REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * A Linear client whose requests time out, and abort when `signal` does. The SDK sets no timeout,
+ * so a stalled connection would hang the poll loop forever.
+ */
+export function createLinearClient(apiKey: string, signal: AbortSignal): LinearClient {
+  const client = new LinearClient({ apiKey });
+  // The SDK spreads `options` into every fetch() call, so a getter yields a fresh signal per request.
+  Object.defineProperty(client.options, "signal", {
+    enumerable: true,
+    get: () => AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+  });
+  return client;
+}
+
 export async function listIssues(
   client: LinearClient,
   filter: LinearDocument.IssueFilter,

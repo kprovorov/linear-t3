@@ -10,7 +10,14 @@ import {
   type Config,
   type ProjectSettings,
 } from "./config.ts";
-import { createCommentOnce, LinearClient, listIssues, moveToState, type Issue } from "./linear.ts";
+import {
+  createCommentOnce,
+  createLinearClient,
+  listIssues,
+  moveToState,
+  type Issue,
+  type LinearClient,
+} from "./linear.ts";
 import { ScanTracker } from "./scan.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import { T3Client, T3ThreadNotCreated, type T3Project, type WorkspaceStrategy } from "./t3.ts";
@@ -324,7 +331,7 @@ async function main() {
   process.on("SIGINT", () => stop("SIGINT"));
 
   const config = await loadConfig(args.config);
-  const linear = new LinearClient({ apiKey: requireEnv("LINEAR_API_KEY") });
+  const linear = createLinearClient(requireEnv("LINEAR_API_KEY"), shutdown.signal);
   const t3Token = args["dry-run"] ? "" : requireEnv("T3_TOKEN");
   const state = new StateStore(config.stateFile);
   await state.load();
