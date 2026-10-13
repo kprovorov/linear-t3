@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { parseArgs } from "node:util";
 import {
   DEFAULT_PROMPT,
   loadConfig,
@@ -21,14 +20,6 @@ import {
 import { StateStore, type LaunchRecord } from "./state.ts";
 import { T3Client, T3ThreadNotCreated, type T3Project, type WorkspaceStrategy } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
-
-const { values: args } = parseArgs({
-  options: {
-    config: { type: "string", default: process.env.CONFIG_PATH ?? "./config.json" },
-    once: { type: "boolean", default: false },
-    "dry-run": { type: "boolean", default: false },
-  },
-});
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
@@ -302,7 +293,16 @@ async function launchCandidates(
   }
 }
 
-async function main() {
+export interface DaemonOptions {
+  configPath: string;
+  // Do one poll, then exit.
+  once: boolean;
+  // List the issues that would be launched without starting threads.
+  dryRun: boolean;
+}
+
+/** Runs the Daemon's poll loop until SIGINT/SIGTERM, or for a single poll with `once`. */
+export async function runDaemon({ configPath, once, dryRun }: DaemonOptions): Promise<void> {
   const stop = (signal: string) => {
     log(`received ${signal}, shutting down`);
     shutdown.abort();
@@ -310,9 +310,9 @@ async function main() {
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
 
-  const config = await loadConfig(args.config);
+  const config = await loadConfig(configPath);
   const linear = createLinearClient(requireEnv("LINEAR_API_KEY"), shutdown.signal);
-  const t3Token = args["dry-run"] ? "" : requireEnv("T3_TOKEN");
+  const t3Token = dryRun ? "" : requireEnv("T3_TOKEN");
   const state = new StateStore(config.stateFile);
   await state.load();
 
@@ -320,20 +320,15 @@ async function main() {
   log(`watching ${watching.join(", ")}`);
   while (!shutdown.signal.aborted) {
     try {
-      await poll(config, linear, state, t3Token, args["dry-run"]);
+      await poll(config, linear, state, t3Token, dryRun);
     } catch (error) {
       if (error instanceof StateWriteError) throw error;
       log(`poll failed: ${(error as Error).message}`);
-      if (args.once) process.exitCode = 1;
+      if (once) process.exitCode = 1;
     }
-    if (args.once || shutdown.signal.aborted) break;
+    if (once || shutdown.signal.aborted) break;
     await setTimeout(config.pollIntervalSeconds * 1000, undefined, {
       signal: shutdown.signal,
     }).catch(() => {});
   }
 }
-
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
-});

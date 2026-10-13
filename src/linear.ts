@@ -9,7 +9,8 @@ const REQUEST_TIMEOUT_MS = 60_000;
  * so a stalled connection would hang the poll loop forever.
  */
 export function createLinearClient(apiKey: string, signal: AbortSignal): LinearClient {
-  const client = new LinearClient({ apiKey });
+  // LINEAR_API_URL points the Daemon at another GraphQL endpoint, such as a local fake in tests.
+  const client = new LinearClient({ apiKey, apiUrl: process.env.LINEAR_API_URL || undefined });
   // The SDK spreads `options` into every fetch() call, so a getter yields a fresh signal per request.
   Object.defineProperty(client.options, "signal", {
     enumerable: true,
