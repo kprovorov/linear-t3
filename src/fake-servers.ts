@@ -21,8 +21,11 @@ async function listen(server: Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
-/** A Linear GraphQL API that answers the viewer query with a fixed user and every other query with `issues`. */
-export async function fakeLinear(issues: FakeIssue[]) {
+/**
+ * A Linear GraphQL API that answers the viewer query with a fixed user and every other query with
+ * `issues`. With `apiKey` set, any other key gets Linear's authentication error.
+ */
+export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: string } = {}) {
   const queries: string[] = [];
   // The API key each request was sent with.
   const apiKeys: (string | undefined)[] = [];
@@ -31,6 +34,12 @@ export async function fakeLinear(issues: FakeIssue[]) {
     queries.push(query);
     apiKeys.push(req.headers.authorization);
     res.setHeader("content-type", "application/json");
+    if (apiKey !== undefined && req.headers.authorization !== apiKey) {
+      res.statusCode = 400;
+      const extensions = { type: "authentication error", code: "AUTHENTICATION_ERROR" };
+      res.end(JSON.stringify({ errors: [{ message: "Authentication required", extensions }] }));
+      return;
+    }
     if (/\bviewer\b/.test(query)) {
       const viewer = { id: "user-1", name: "Ada", email: "ada@example.com" };
       res.end(JSON.stringify({ data: { viewer } }));
@@ -109,18 +118,25 @@ interface RpcRequest {
 
 export interface FakeT3Options {
   projects: { id: string; title: string; workspaceRoot: string }[];
+  /** When set, the ticket endpoint answers 401 to any other bearer token. */
+  token?: string;
   /** Called for each launch; the launch succeeds once it resolves. */
   onLaunch?: (payload: Record<string, unknown>) => Promise<void>;
 }
 
 /** A T3 Code server: the websocket ticket endpoint plus the shell and launch RPCs. */
-export async function fakeT3({ projects, onLaunch }: FakeT3Options) {
+export async function fakeT3({ projects, token, onLaunch }: FakeT3Options) {
   const requests: string[] = [];
   const launches: Record<string, unknown>[] = [];
   const sockets = new Set<Duplex>();
   const server = createServer((req, res) => {
     requests.push(`${req.method} ${req.url}`);
     if (req.method === "POST" && req.url === "/api/auth/websocket-ticket") {
+      if (token !== undefined && req.headers.authorization !== `Bearer ${token}`) {
+        res.statusCode = 401;
+        res.end();
+        return;
+      }
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ ticket: "ticket" }));
     } else {

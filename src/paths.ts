@@ -5,12 +5,14 @@ type Env = Record<string, string | undefined>;
 
 const APP = "linear-t3";
 
+const home = (env: Env) => env.HOME || homedir();
+
 /** An XDG base directory: the variable if it holds an absolute path, else `~/<fallback>`. */
 function xdgDir(env: Env, variable: string, fallback: string): string {
   const value = env[variable];
   // The XDG spec says relative paths are invalid and should be ignored.
   if (value && isAbsolute(value)) return value;
-  return join(env.HOME || homedir(), fallback);
+  return join(home(env), fallback);
 }
 
 const configDir = (env: Env) => join(xdgDir(env, "XDG_CONFIG_HOME", ".config"), APP);
@@ -24,6 +26,10 @@ export interface Paths {
   credentials: string;
   /** Where State goes when the Config doesn't set `stateFile`. */
   defaultState: string;
+  /** The background service's log file, on platforms where it doesn't log to a journal. */
+  log: string;
+  /** The launchd agent that runs the Daemon on macOS. */
+  launchAgent: string;
 }
 
 export function resolvePaths(configFlag?: string, env: Env = process.env): Paths {
@@ -31,6 +37,8 @@ export function resolvePaths(configFlag?: string, env: Env = process.env): Paths
     config: resolve(configFlag || env.LINEAR_T3_CONFIG || join(configDir(env), "config.json")),
     credentials: join(configDir(env), "credentials"),
     defaultState: join(stateDir(env), "state.json"),
+    log: join(stateDir(env), "daemon.log"),
+    launchAgent: join(home(env), "Library", "LaunchAgents", `${APP}.plist`),
   };
 }
 

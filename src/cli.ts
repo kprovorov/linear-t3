@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as clack from "@clack/prompts";
 import { Argument, Command } from "commander";
 import {
@@ -15,7 +16,10 @@ import {
 import { t3BaseUrl, t3Integration } from "./connect-t3.ts";
 import { runDaemon } from "./daemon.ts";
 import { EnvFile } from "./env-file.ts";
-import { resolvePaths } from "./paths.ts";
+import { loadConfig } from "./config.ts";
+import { resolvePaths, resolveStateFile } from "./paths.ts";
+import { preflight } from "./preflight.ts";
+import { ServiceError, daemonUnit, serviceManager } from "./service.ts";
 import { checkLinear } from "./token-check.ts";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -150,6 +154,100 @@ async function runDaemonCommand({ once = false, dryRun = false }): Promise<void>
   }
 }
 
+/** Runs a background service command, printing a `ServiceError` and exiting 1 on failure. */
+async function exitOnServiceError(work: () => Promise<void>): Promise<void> {
+  try {
+    await work();
+  } catch (error) {
+    if (!(error instanceof ServiceError)) throw error;
+    console.error(error.message);
+    process.exit(1);
+  }
+}
+
+const cliPath = fileURLToPath(import.meta.url);
+
+async function start(): Promise<void> {
+  const where = paths();
+  const manager = serviceManager(where);
+  // npm can clean the npx cache at any time, which would leave the service pointing at nothing.
+  if ([process.argv[1], cliPath].some((path) => path?.split(sep).includes("_npx"))) {
+    throw new ServiceError(
+      "linear-t3 is running from the npx cache, which npm may clean up. Install it first with `npm i -g linear-t3`, then run `linear-t3 start`",
+    );
+  }
+  const problems = await preflight(where);
+  if (problems.length > 0) {
+    throw new ServiceError(
+      ["The Daemon would not start, so it wasn't installed:", ...problems].join("\n"),
+    );
+  }
+  await manager.install(daemonUnit(where, cliPath));
+  console.log(`Started the Daemon (launchd agent ${manager.unitPath})`);
+}
+
+/** The service manager, once `start` has installed the Daemon. */
+function installedService() {
+  const manager = serviceManager(paths());
+  if (!manager.installed()) {
+    throw new ServiceError(
+      "The Daemon isn't installed as a background service; run `linear-t3 start`",
+    );
+  }
+  return manager;
+}
+
+async function stop(): Promise<void> {
+  await installedService().stop();
+  console.log("Stopped the Daemon; it won't start at login until `linear-t3 start`");
+}
+
+async function restart(): Promise<void> {
+  await installedService().restart();
+  console.log("Restarted the Daemon");
+}
+
+async function uninstall(): Promise<void> {
+  const manager = installedService();
+  await manager.uninstall();
+  console.log(`Removed ${manager.unitPath}; the Config, Credentials and State are kept`);
+}
+
+async function status(): Promise<void> {
+  const where = paths();
+  const manager = serviceManager(where);
+  let daemon = "not installed, run `linear-t3 start`";
+  if (manager.installed()) {
+    const { running, pid, uptime } = await manager.status();
+    daemon = running ? `running (pid ${pid}${uptime ? `, up ${uptime}` : ""})` : "stopped";
+    const node = manager.pinnedNode();
+    if (node && !existsSync(node)) {
+      console.error(
+        `The Daemon runs ${node}, which no longer exists; run \`linear-t3 start\` again to use this node`,
+      );
+    }
+  }
+  // An unreadable Config can't say where State is, so show where it would be by default.
+  const state = await loadConfig(where.config).then(
+    (config) => resolveStateFile(where, config.stateFile),
+    () => where.defaultState,
+  );
+  console.log(
+    [
+      `Daemon:      ${daemon}`,
+      `Config:      ${where.config}`,
+      `Credentials: ${where.credentials}`,
+      `State:       ${state}`,
+      `Log:         ${where.log}`,
+      `Unit:        ${manager.unitPath}`,
+    ].join("\n"),
+  );
+}
+
+async function logs({ follow = false }): Promise<void> {
+  process.exitCode = await installedService().logs(follow);
+}
+
 const program = new Command("linear-t3")
   .version(pkg.version)
   .option(
@@ -183,5 +281,38 @@ program
   .option("--once", "do one poll, then exit")
   .option("--dry-run", "list the issues it would launch without starting threads, then exit")
   .action(runDaemonCommand);
+
+program
+  .command("start")
+  .description("install and start the Daemon as a background service; safe to run again")
+  .action(() => exitOnServiceError(start));
+
+program
+  .command("stop")
+  .description("stop the Daemon and keep it from starting at login")
+  .action(() => exitOnServiceError(stop));
+
+program
+  .command("restart")
+  .description("restart the Daemon, e.g. to pick up Config changes")
+  .action(() => exitOnServiceError(restart));
+
+program
+  .command("status")
+  .description("show whether the Daemon is running and where its files are")
+  .action(() => exitOnServiceError(status));
+
+program
+  .command("logs")
+  .description("show the Daemon's recent output")
+  .option("-f, --follow", "keep printing new output")
+  .action((options: { follow?: boolean }) => exitOnServiceError(() => logs(options)));
+
+program
+  .command("uninstall")
+  .description(
+    "stop the Daemon and remove the background service; keeps Config, Credentials and State",
+  )
+  .action(() => exitOnServiceError(uninstall));
 
 await program.parseAsync();
