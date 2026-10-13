@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 type Env = Record<string, string | undefined>;
 
@@ -9,7 +9,7 @@ const APP = "linear-t3";
 function xdgDir(env: Env, variable: string, fallback: string): string {
   const value = env[variable];
   // The XDG spec says relative paths are invalid and should be ignored.
-  if (value && value.startsWith("/")) return value;
+  if (value && isAbsolute(value)) return value;
   return join(env.HOME || homedir(), fallback);
 }
 

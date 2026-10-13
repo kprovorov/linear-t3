@@ -64,7 +64,7 @@ function describeFailure(name: string, result: Failure): string {
  */
 export async function connectIntegration(
   integration: Integration,
-  env: EnvFile,
+  credentials: EnvFile,
   ui: Ui,
 ): Promise<Outcome> {
   const handleFailure = (step: Step, result: Failure) => {
@@ -85,7 +85,7 @@ export async function connectIntegration(
     return result;
   };
 
-  const existing = env.get(integration.envKey);
+  const existing = credentials.get(integration.envKey);
   if (existing !== undefined) {
     const result = await check("existing", existing);
     if (result.status !== "valid") {
@@ -99,7 +99,7 @@ export async function connectIntegration(
     const token = await integration.obtain(ui);
     const result = await check("new", token);
     if (result.status === "valid") {
-      env.set({ [integration.envKey]: token });
+      credentials.set({ [integration.envKey]: token });
       return { integration: integration.name, action: "saved", identity: result.identity };
     }
     handleFailure("new", result);
@@ -114,7 +114,7 @@ export interface PendingIntegration {
 /** Connects each integration in order and stops at the first one that fails. */
 export async function connect(
   integrations: (Integration | PendingIntegration)[],
-  env: EnvFile,
+  credentials: EnvFile,
   ui: Ui,
 ): Promise<Outcome[]> {
   const outcomes: Outcome[] = [];
@@ -122,7 +122,7 @@ export async function connect(
     if (!("check" in integration)) {
       throw new ConnectError(`Connecting ${integration.name} is not implemented yet`);
     }
-    outcomes.push(await connectIntegration(integration, env, ui));
+    outcomes.push(await connectIntegration(integration, credentials, ui));
   }
   return outcomes;
 }
