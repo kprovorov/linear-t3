@@ -21,12 +21,12 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    env:
-      GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
     steps:
       - name: Require RELEASE_PR_TOKEN
+        env:
+          RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
+          if [ -z "$RELEASE_PR_TOKEN" ]; then
             echo "::error::The RELEASE_PR_TOKEN repo secret is not set."
             exit 1
           fi
@@ -45,29 +45,40 @@ jobs:
           version="$(npm version "$BUMP" --no-git-tag-version)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "branch=release/$version" >> "$GITHUB_OUTPUT"
-      - name: Check only package.json changed
+      - name: Check only the version field changed
         run: |
           changed="$(git status --porcelain)"
-          if [ "$changed" != " M package.json" ]; then
-            echo "::error::Expected only package.json to change, got:"
-            echo "$changed"
+          added="$(git diff --unified=0 | grep '^+ ' || true)"
+          if [ "$changed" != " M package.json" ] \
+            || [ "$(git diff --numstat)" != "$(printf '1\t1\tpackage.json')" ] \
+            || ! printf '%s' "$added" | grep -q '^+ *"version": '; then
+            echo "::error::Expected only the version field in package.json to change, got:"
+            git status --short
+            git diff
             exit 1
           fi
-      - name: Fail if the release branch or PR already exists
+      # An open PR always has its head branch, so checking the branch also
+      # catches an existing release PR.
+      - name: Fail if the release branch already exists
         env:
           BRANCH: ${{ steps.bump.outputs.branch }}
         run: |
-          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
-            echo "::error::Branch $BRANCH already exists."
-            exit 1
-          fi
-          pr="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[].url')"
-          if [ -n "$pr" ]; then
-            echo "::error::A PR for $BRANCH already exists: $pr"
-            exit 1
-          fi
+          status=0
+          git ls-remote --exit-code origin "refs/heads/$BRANCH" > /dev/null || status=$?
+          case "$status" in
+            0)
+              echo "::error::Branch $BRANCH already exists, so a release PR for it may already be open."
+              exit 1
+              ;;
+            2) ;;
+            *)
+              echo "::error::Could not check whether $BRANCH exists (git ls-remote exited $status)."
+              exit 1
+              ;;
+          esac
       - name: Commit, push and open the PR
         env:
+          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
           VERSION: ${{ steps.bump.outputs.version }}
           BRANCH: ${{ steps.bump.outputs.branch }}
         run: |
