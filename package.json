@@ -1,10 +1,30 @@
 {
   "name": "linear-t3",
   "version": "0.1.0",
-  "private": true,
   "description": "Daemon that polls Linear issues and launches T3 Code threads for them",
+  "keywords": [
+    "automation",
+    "cli",
+    "daemon",
+    "linear",
+    "t3",
+    "t3-code"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kprovorov/linear-t3.git"
+  },
+  "bin": {
+    "linear-t3": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
   "type": "module",
   "scripts": {
+    "build": "vp pack",
+    "prepack": "pnpm build",
     "start": "node src/cli.ts run",
     "once": "node src/cli.ts run --once",
     "dry-run": "node src/cli.ts run --dry-run",

@@ -30,3 +30,31 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm test
+
+  # Packs the tarball, installs it into a throwaway global prefix and runs the installed CLI, so a
+  # broken `bin`, a missing file or a leftover `.ts` import fails here instead of after publishing.
+  # It uses npm rather than pnpm on purpose: that's how users install it.
+  pack-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Pack
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Install the tarball globally
+        run: npm install --global --prefix "$RUNNER_TEMP/prefix" "$RUNNER_TEMP"/linear-t3-*.tgz
+      - name: Run the installed CLI
+        working-directory: ${{ runner.temp }}
+        run: |
+          export PATH="$RUNNER_TEMP/prefix/bin:$PATH"
+          expected=$(node -p 'require(process.env.GITHUB_WORKSPACE + "/package.json").version')
+          test "$(linear-t3 --version)" = "$expected"
+          linear-t3 --help
+          test "$(npx --yes ./linear-t3-*.tgz --version)" = "$expected"
