@@ -290,7 +290,7 @@ async function launchCandidates(
 }
 
 /** A token from the environment, else from the Credentials file. */
-export function requireToken(key: string, credentials: EnvFile, integration: string): string {
+function requireToken(key: string, credentials: EnvFile, integration: string): string {
   const value = process.env[key] || credentials.get(key);
   if (!value) {
     throw new Error(

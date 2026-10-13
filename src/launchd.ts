@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { Paths } from "./paths.ts";
 import { type ServiceManager, ServiceError, type Unit } from "./service.ts";
@@ -9,6 +10,7 @@ const LABEL = "linear-t3";
 // Seconds launchd waits before restarting a crashed Daemon, and after SIGTERM before SIGKILL.
 const RESTART_DELAY = 10;
 const STOP_TIMEOUT = 30;
+const BOOTSTRAP_ATTEMPTS = 5;
 
 const escapeXml = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -109,10 +111,18 @@ export function launchd(paths: Paths): ServiceManager {
   const domain = `gui/${process.getuid!()}`;
   const target = `${domain}/${LABEL}`;
   const loaded = async () => (await launchctl("print", target)).ok;
+  const unload = async () => {
+    if (await loaded()) await mustLaunchctl("bootout", target);
+  };
   const load = async () => {
     // `stop` disables the agent, and launchd won't load a disabled one.
     await mustLaunchctl("enable", target);
-    // RunAtLoad starts the Daemon as soon as it's loaded.
+    // RunAtLoad starts the Daemon as soon as it's loaded. Right after a bootout launchd may still
+    // be tearing the old job down and refuse, so give it a few tries.
+    for (let attempt = 1; attempt < BOOTSTRAP_ATTEMPTS; attempt++) {
+      if ((await launchctl("bootstrap", domain, paths.launchAgent)).ok) return;
+      await setTimeout(1000);
+    }
     await mustLaunchctl("bootstrap", domain, paths.launchAgent);
   };
 
@@ -128,14 +138,14 @@ export function launchd(paths: Paths): ServiceManager {
 
     async install(unit) {
       // launchd only rereads the agent when it loads it, so unload the old one first.
-      if (await loaded()) await mustLaunchctl("bootout", target);
+      await unload();
       mkdirSync(dirname(paths.launchAgent), { recursive: true });
       mkdirSync(dirname(paths.log), { recursive: true });
       writeFileSync(paths.launchAgent, plist(unit, paths.log));
       await load();
     },
     async stop() {
-      if (await loaded()) await mustLaunchctl("bootout", target);
+      await unload();
       // A disabled agent stays unloaded at the next login, even though its file is still there.
       await mustLaunchctl("disable", target);
     },
@@ -144,16 +154,17 @@ export function launchd(paths: Paths): ServiceManager {
       else await load();
     },
     async status() {
-      // `print` fails for an agent that isn't loaded, which is as stopped as it gets.
+      // `print` fails for an agent that isn't loaded, which is as stopped as it gets. Only the
+      // top-level fields count, not those of nested blocks, which are indented further.
       const { ok, output } = await launchctl("print", target);
-      const running = ok && /^\s*state = running$/m.test(output);
-      const pid = /^\s*pid = (\d+)$/m.exec(output)?.[1];
+      const running = ok && /^\tstate = running$/m.test(output);
+      const pid = /^\tpid = (\d+)$/m.exec(output)?.[1];
       if (!running || !pid) return { running: false };
       return { running, pid: Number(pid), uptime: await elapsed(Number(pid)) };
     },
     logs: (follow) => tail(paths.log, follow),
     async uninstall() {
-      if (await loaded()) await mustLaunchctl("bootout", target);
+      await unload();
       rmSync(paths.launchAgent, { force: true });
     },
   };

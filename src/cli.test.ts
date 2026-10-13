@@ -470,86 +470,84 @@ describe("cli run against fake Linear and T3", () => {
 });
 
 // launchd only exists on macOS; CI runs this suite on a macOS runner.
-describe.runIf(process.platform === "darwin")(
-  "cli background service on macOS",
-  () => {
-    const cleanup: (() => void)[] = [];
-    afterEach(() => cleanup.splice(0).forEach((close) => close()));
+describe.runIf(process.platform === "darwin")("cli background service on macOS", () => {
+  const cleanup: (() => void)[] = [];
+  afterEach(() => cleanup.splice(0).forEach((close) => close()));
 
-    const uid = process.getuid!();
-    const target = `gui/${uid}/linear-t3`;
+  const uid = process.getuid!();
+  const target = `gui/${uid}/linear-t3`;
 
-    /**
-     * A fresh home with a valid Config and Credentials, fake T3 and Linear servers that accept only
-     * those tokens, and a stand-in `launchctl` on `PATH` that records each call. `launchctl print`
-     * shows `printed` once it is set, else fails the way it does for an agent that isn't loaded.
-     */
-    async function service() {
-      const linear = await fakeLinear([], { apiKey: "lin-key" });
-      const t3 = await fakeT3({ projects: [], token: "t3-tok" });
-      cleanup.push(linear.close, t3.close);
-      const home = homeDir();
-      const files = {
-        ...locations(home),
-        log: join(home.XDG_STATE_HOME, "linear-t3", "daemon.log"),
-        agent: join(home.HOME, "Library", "LaunchAgents", "linear-t3.plist"),
-      };
-      writeFile(
-        files.config,
-        JSON.stringify({
-          projects: { "my-app": { linear: { team: "ENG" } } },
-          t3: { url: t3.url },
-        }),
-      );
-      writeFile(files.credentials, "LINEAR_API_KEY=lin-key\nT3_TOKEN=t3-tok\n");
-      const bin = mkdtempSync(join(tmpdir(), "linear-t3-bin-"));
-      const calls = join(bin, "calls");
-      const printed = join(bin, "printed");
-      writeFileSync(
-        join(bin, "launchctl"),
-        [
-          "#!/bin/sh",
-          `echo "$*" >> "${calls}"`,
-          'if [ "$1" = print ]; then',
-          `  if [ -f "${printed}" ]; then cat "${printed}"; exit 0; fi`,
-          `  echo "Could not find service \\"linear-t3\\" in domain for user gui: ${uid}" >&2`,
-          "  exit 113",
-          "fi",
-        ].join("\n"),
-        { mode: 0o755 },
-      );
-      const env = { ...home, LINEAR_API_URL: linear.url, PATH: `${bin}:${process.env.PATH}` };
-      const dir = mkdtempSync(join(tmpdir(), "linear-t3-cwd-"));
-      return {
-        env,
-        files,
-        cli: (...args: string[]) => startCli({ cwd: dir, env }, args).result,
-        launchctl: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []),
-        print: (output: string) => writeFileSync(printed, output),
-        resetCalls: () => writeFileSync(calls, ""),
-      };
-    }
+  /**
+   * A fresh home with a valid Config and Credentials, fake T3 and Linear servers that accept only
+   * those tokens, and a stand-in `launchctl` on `PATH` that records each call. `launchctl print`
+   * shows `printed` once it is set, else fails the way it does for an agent that isn't loaded.
+   */
+  async function service() {
+    const linear = await fakeLinear([], { apiKey: "lin-key" });
+    const t3 = await fakeT3({ projects: [], token: "t3-tok" });
+    cleanup.push(linear.close, t3.close);
+    const home = homeDir();
+    const files = {
+      ...locations(home),
+      log: join(home.XDG_STATE_HOME, "linear-t3", "daemon.log"),
+      agent: join(home.HOME, "Library", "LaunchAgents", "linear-t3.plist"),
+    };
+    writeFile(
+      files.config,
+      JSON.stringify({
+        projects: { "my-app": { linear: { team: "ENG" } } },
+        t3: { url: t3.url },
+      }),
+    );
+    writeFile(files.credentials, "LINEAR_API_KEY=lin-key\nT3_TOKEN=t3-tok\n");
+    const bin = mkdtempSync(join(tmpdir(), "linear-t3-bin-"));
+    const calls = join(bin, "calls");
+    const printed = join(bin, "printed");
+    writeFileSync(
+      join(bin, "launchctl"),
+      [
+        "#!/bin/sh",
+        `echo "$*" >> "${calls}"`,
+        'if [ "$1" = print ]; then',
+        `  if [ -f "${printed}" ]; then cat "${printed}"; exit 0; fi`,
+        `  echo "Could not find service \\"linear-t3\\" in domain for user gui: ${uid}" >&2`,
+        "  exit 113",
+        "fi",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const env = { ...home, LINEAR_API_URL: linear.url, PATH: `${bin}:${process.env.PATH}` };
+    const dir = mkdtempSync(join(tmpdir(), "linear-t3-cwd-"));
+    return {
+      env,
+      files,
+      cli: (...args: string[]) => startCli({ cwd: dir, env }, args).result,
+      launchctl: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []),
+      print: (output: string) => writeFileSync(printed, output),
+      resetCalls: () => writeFileSync(calls, ""),
+    };
+  }
 
-    /** `service()` after a successful `start`, with launchd reporting the agent as `state`. */
-    async function installed(state: "running" | "stopped" | "unloaded" = "running") {
-      const setup = await service();
-      expect((await setup.cli("start")).status).toBe(0);
-      if (state === "running") setup.print(printed(`state = running\n\tpid = ${process.pid}`));
-      if (state === "stopped") setup.print(printed("state = not running"));
-      setup.resetCalls();
-      return setup;
-    }
+  /** `service()` after a successful `start`, with launchd reporting the agent as `state`. */
+  async function installed(state: "running" | "stopped" | "unloaded" = "running") {
+    const setup = await service();
+    expect((await setup.cli("start")).status).toBe(0);
+    if (state === "running") setup.print(printed(`state = running\n\tpid = ${process.pid}`));
+    if (state === "stopped") setup.print(printed("state = not running"));
+    setup.resetCalls();
+    return setup;
+  }
 
-    /** What `launchctl print` shows for the agent, around `details`. */
-    const printed = (details: string) =>
-      `${target} = {\n\tactive count = 1\n\tpath = /x/linear-t3.plist\n\t${details}\n}\n`;
+  /** What `launchctl print` shows for the agent, around `details`. */
+  const printed = (details: string) =>
+    `${target} = {\n\tactive count = 1\n\tpath = /x/linear-t3.plist\n\t${details}\n}\n`;
 
-    /** The agent `start` should write for `files`, with `env` as its environment. */
-    function expectedAgent(files: { config: string; log: string }, env: Record<string, string>) {
-      const variables = Object.entries(env)
-        .map(([key, value]) => `\t\t<key>${key}</key>\n\t\t<string>${value}</string>\n`)
-        .join("");
-      return `<?xml version="1.0" encoding="UTF-8"?>
+  /** The agent `start` should write for `files`, with `env` as its environment. */
+  function expectedAgent(files: { config: string; log: string }, env: Record<string, string>) {
+    const variables = Object.entries(env)
+      .map(([key, value]) => `\t\t<key>${key}</key>\n\t\t<string>${value}</string>\n`)
+      .join("");
+    return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -584,293 +582,300 @@ ${variables}\t</dict>
 </dict>
 </plist>
 `;
+  }
+
+  test("start writes the launchd agent and loads it", async () => {
+    const { env, files, cli, launchctl } = await service();
+    const result = await cli("start");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(readFileSync(files.agent, "utf8")).toBe(
+      expectedAgent(files, {
+        XDG_CONFIG_HOME: env.XDG_CONFIG_HOME,
+        XDG_STATE_HOME: env.XDG_STATE_HOME,
+      }),
+    );
+    expect(launchctl()).toEqual([
+      `print ${target}`,
+      `enable ${target}`,
+      `bootstrap gui/${uid} ${files.agent}`,
+    ]);
+    expect(existsSync(dirname(files.log))).toBe(true);
+  });
+
+  test.each<{
+    case: string;
+    breaks: (files: Record<string, string>) => void;
+    env?: Record<string, string>;
+    fix: RegExp;
+  }>([
+    { case: "no Config", breaks: (f) => rmSync(f.config!), fix: /linear-t3 setup/ },
+    {
+      case: "an invalid Config",
+      breaks: (f) => writeFile(f.config!, "{}"),
+      fix: /Invalid config[\s\S]*fix it, then run `linear-t3 start` again/,
+    },
+    {
+      case: "no Linear key",
+      breaks: (f) => writeFile(f.credentials!, "T3_TOKEN=t3-tok\n"),
+      fix: /Missing LINEAR_API_KEY: run `linear-t3 connect linear`/,
+    },
+    {
+      case: "the Linear key only in the environment",
+      breaks: (f) => writeFile(f.credentials!, "T3_TOKEN=t3-tok\n"),
+      env: { LINEAR_API_KEY: "lin-key" },
+      fix: /LINEAR_API_KEY is only set in the environment.*run `linear-t3 connect linear`/,
+    },
+    {
+      case: "no T3 token",
+      breaks: (f) => writeFile(f.credentials!, "LINEAR_API_KEY=lin-key\n"),
+      fix: /Missing T3_TOKEN: run `linear-t3 connect t3`/,
+    },
+    {
+      case: "a Linear key Linear rejects",
+      breaks: (f) => writeFile(f.credentials!, "LINEAR_API_KEY=old\nT3_TOKEN=t3-tok\n"),
+      fix: /Linear rejected the key.*\n.*run `linear-t3 connect linear`/,
+    },
+    {
+      case: "a T3 token T3 rejects",
+      breaks: (f) => writeFile(f.credentials!, "LINEAR_API_KEY=lin-key\nT3_TOKEN=old\n"),
+      fix: /rejected the token.*\n.*run `linear-t3 connect t3`/,
+    },
+  ])("start with $case exits non-zero with the fix and installs nothing", async (failure) => {
+    const { env, files, launchctl } = await service();
+    failure.breaks(files);
+    const result = await startCli({ cwd: tmpdir(), env: { ...env, ...failure.env } }, ["start"])
+      .result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(failure.fix);
+    expect(existsSync(files.agent)).toBe(false);
+    expect(launchctl()).toEqual([]);
+  });
+
+  test("start with T3 down exits non-zero and installs nothing", async () => {
+    const { files, cli, launchctl } = await service();
+    const config = {
+      projects: { a: { linear: { team: "ENG" } } },
+      t3: { url: "http://127.0.0.1:1" },
+    };
+    writeFile(files.config, JSON.stringify(config));
+    const result = await cli("start");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("T3 not reachable at http://127.0.0.1:1");
+    expect(existsSync(files.agent)).toBe(false);
+    expect(launchctl()).toEqual([]);
+  });
+
+  test("start from the npx cache refuses and says to install globally", async () => {
+    const { env, files, launchctl } = await service();
+    // Where npx puts a package it runs without installing it.
+    const npxCli = join(mkdtempSync(join(tmpdir(), "linear-t3-npm-")), "_npx", "1a2b", "cli.ts");
+    mkdirSync(dirname(npxCli), { recursive: true });
+    symlinkSync(cliPath, npxCli);
+    const result = await startCli({ cwd: tmpdir(), env, cli: npxCli }, ["start"]).result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("npm i -g linear-t3");
+    expect(existsSync(files.agent)).toBe(false);
+    expect(launchctl()).toEqual([]);
+  });
+
+  test("start again unloads the old agent, then rewrites and reloads it", async () => {
+    const { files, cli, launchctl, print, resetCalls } = await service();
+    expect((await cli("start")).status).toBe(0);
+    writeFileSync(files.agent, "stale");
+    print(printed(`state = running\n\tpid = ${process.pid}`));
+    resetCalls();
+    const result = await cli("start");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(readFileSync(files.agent, "utf8")).toContain("<string>run</string>");
+    expect(launchctl()).toEqual([
+      `print ${target}`,
+      `bootout ${target}`,
+      `enable ${target}`,
+      `bootstrap gui/${uid} ${files.agent}`,
+    ]);
+  });
+
+  test("the agent gets T3CODE_HOME and LINEAR_T3_CONFIG when set, and never the tokens", async () => {
+    const { env, files } = await service();
+    const t3Home = mkdtempSync(join(tmpdir(), "linear-t3-t3home-"));
+    const { status } = await startCli(
+      { cwd: tmpdir(), env: { ...env, T3CODE_HOME: t3Home, LINEAR_T3_CONFIG: files.config } },
+      ["start"],
+    ).result;
+    expect(status).toBe(0);
+    expect(readFileSync(files.agent, "utf8")).toBe(
+      expectedAgent(files, {
+        T3CODE_HOME: t3Home,
+        LINEAR_T3_CONFIG: files.config,
+        XDG_CONFIG_HOME: env.XDG_CONFIG_HOME,
+        XDG_STATE_HOME: env.XDG_STATE_HOME,
+      }),
+    );
+  });
+
+  test("tokens from the environment stay out of the agent", async () => {
+    const { env, files } = await service();
+    const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
+    const { status } = await startCli({ cwd: tmpdir(), env: { ...env, ...tokens } }, ["start"])
+      .result;
+    expect(status).toBe(0);
+    const agent = readFileSync(files.agent, "utf8");
+    expect(agent).not.toContain("lin-key");
+    expect(agent).not.toContain("t3-tok");
+  });
+
+  test("stop unloads the agent and disables it so it doesn't start at login", async () => {
+    const { cli, launchctl } = await installed();
+    const result = await cli("stop");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(launchctl()).toEqual([`print ${target}`, `bootout ${target}`, `disable ${target}`]);
+  });
+
+  test("stop when already stopped only disables the agent", async () => {
+    const { cli, launchctl } = await installed("unloaded");
+    expect((await cli("stop")).status).toBe(0);
+    expect(launchctl()).toEqual([`print ${target}`, `disable ${target}`]);
+  });
+
+  test("restart kills and restarts a loaded agent", async () => {
+    const { cli, launchctl } = await installed();
+    expect(await cli("restart")).toMatchObject({ status: 0, stderr: "" });
+    expect(launchctl()).toEqual([`print ${target}`, `kickstart -k ${target}`]);
+  });
+
+  test("restart after stop enables and loads the agent again", async () => {
+    const { files, cli, launchctl } = await installed("unloaded");
+    expect(await cli("restart")).toMatchObject({ status: 0, stderr: "" });
+    expect(launchctl()).toEqual([
+      `print ${target}`,
+      `enable ${target}`,
+      `bootstrap gui/${uid} ${files.agent}`,
+    ]);
+  });
+
+  test("uninstall unloads and removes the agent but keeps Config, Credentials, State and log", async () => {
+    const { files, cli, launchctl } = await installed();
+    writeFile(files.state, "{}");
+    writeFile(files.log, "old output\n");
+    const result = await cli("uninstall");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(launchctl()).toEqual([`print ${target}`, `bootout ${target}`]);
+    expect(existsSync(files.agent)).toBe(false);
+    for (const kept of [files.config, files.credentials, files.state, files.log]) {
+      expect(existsSync(kept)).toBe(true);
     }
+  });
 
-    test("start writes the launchd agent and loads it", async () => {
-      const { env, files, cli, launchctl } = await service();
-      const result = await cli("start");
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(readFileSync(files.agent, "utf8")).toBe(
-        expectedAgent(files, {
-          XDG_CONFIG_HOME: env.XDG_CONFIG_HOME,
-          XDG_STATE_HOME: env.XDG_STATE_HOME,
-        }),
-      );
-      expect(launchctl()).toEqual([
-        `print ${target}`,
-        `enable ${target}`,
-        `bootstrap gui/${uid} ${files.agent}`,
-      ]);
-      expect(existsSync(dirname(files.log))).toBe(true);
-    });
-
-    test.each<{ case: string; breaks: (files: Record<string, string>) => void; fix: RegExp }>([
-      { case: "no Config", breaks: (f) => rmSync(f.config!), fix: /linear-t3 setup/ },
-      {
-        case: "an invalid Config",
-        breaks: (f) => writeFile(f.config!, "{}"),
-        fix: /Invalid config[\s\S]*fix it, then run `linear-t3 start` again/,
-      },
-      {
-        case: "no Linear key",
-        breaks: (f) => writeFile(f.credentials!, "T3_TOKEN=t3-tok\n"),
-        fix: /Missing LINEAR_API_KEY: run `linear-t3 connect linear`/,
-      },
-      {
-        case: "no T3 token",
-        breaks: (f) => writeFile(f.credentials!, "LINEAR_API_KEY=lin-key\n"),
-        fix: /Missing T3_TOKEN: run `linear-t3 connect t3`/,
-      },
-      {
-        case: "a Linear key Linear rejects",
-        breaks: (f) => writeFile(f.credentials!, "LINEAR_API_KEY=old\nT3_TOKEN=t3-tok\n"),
-        fix: /Linear rejected the key.*\n.*run `linear-t3 connect linear`/,
-      },
-      {
-        case: "a T3 token T3 rejects",
-        breaks: (f) => writeFile(f.credentials!, "LINEAR_API_KEY=lin-key\nT3_TOKEN=old\n"),
-        fix: /rejected the token.*\n.*run `linear-t3 connect t3`/,
-      },
-    ])(
-      "start with $case exits non-zero with the fix and installs nothing",
-      async ({ breaks, fix }) => {
-        const { files, cli, launchctl } = await service();
-        breaks(files);
-        const result = await cli("start");
-        expect(result.status).toBe(1);
-        expect(result.stderr).toMatch(fix);
-        expect(existsSync(files.agent)).toBe(false);
-        expect(launchctl()).toEqual([]);
-      },
-    );
-
-    test("start with T3 down exits non-zero and installs nothing", async () => {
-      const { files, cli, launchctl } = await service();
-      const config = {
-        projects: { a: { linear: { team: "ENG" } } },
-        t3: { url: "http://127.0.0.1:1" },
-      };
-      writeFile(files.config, JSON.stringify(config));
-      const result = await cli("start");
+  test.each(["stop", "restart", "logs", "uninstall"])(
+    "%s when the service isn't installed says so and exits non-zero",
+    async (command) => {
+      const { cli, launchctl } = await service();
+      const result = await cli(command);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("T3 not reachable at http://127.0.0.1:1");
-      expect(existsSync(files.agent)).toBe(false);
-      expect(launchctl()).toEqual([]);
-    });
-
-    test("start from the npx cache refuses and says to install globally", async () => {
-      const { env, files, launchctl } = await service();
-      // Where npx puts a package it runs without installing it.
-      const npxCli = join(mkdtempSync(join(tmpdir(), "linear-t3-npm-")), "_npx", "1a2b", "cli.ts");
-      mkdirSync(dirname(npxCli), { recursive: true });
-      symlinkSync(cliPath, npxCli);
-      const result = await startCli({ cwd: tmpdir(), env, cli: npxCli }, ["start"]).result;
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain("npm i -g linear-t3");
-      expect(existsSync(files.agent)).toBe(false);
-      expect(launchctl()).toEqual([]);
-    });
-
-    test("start again unloads the old agent, then rewrites and reloads it", async () => {
-      const { files, cli, launchctl, print, resetCalls } = await service();
-      expect((await cli("start")).status).toBe(0);
-      writeFileSync(files.agent, "stale");
-      print(printed(`state = running\n\tpid = ${process.pid}`));
-      resetCalls();
-      const result = await cli("start");
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(readFileSync(files.agent, "utf8")).toContain("<string>run</string>");
-      expect(launchctl()).toEqual([
-        `print ${target}`,
-        `bootout ${target}`,
-        `enable ${target}`,
-        `bootstrap gui/${uid} ${files.agent}`,
-      ]);
-    });
-
-    test("the agent gets T3CODE_HOME and LINEAR_T3_CONFIG when set, and never the tokens", async () => {
-      const { env, files } = await service();
-      const t3Home = mkdtempSync(join(tmpdir(), "linear-t3-t3home-"));
-      const { status } = await startCli(
-        { cwd: tmpdir(), env: { ...env, T3CODE_HOME: t3Home, LINEAR_T3_CONFIG: files.config } },
-        ["start"],
-      ).result;
-      expect(status).toBe(0);
-      expect(readFileSync(files.agent, "utf8")).toBe(
-        expectedAgent(files, {
-          T3CODE_HOME: t3Home,
-          LINEAR_T3_CONFIG: files.config,
-          XDG_CONFIG_HOME: env.XDG_CONFIG_HOME,
-          XDG_STATE_HOME: env.XDG_STATE_HOME,
-        }),
+      expect(result.stderr).toContain(
+        "The Daemon isn't installed as a background service; run `linear-t3 start`",
       );
-    });
+      expect(launchctl()).toEqual([]);
+    },
+  );
 
-    test("tokens from the environment stay out of the agent", async () => {
-      const { env, files } = await service();
-      writeFile(files.credentials, "");
-      const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
-      const { status } = await startCli({ cwd: tmpdir(), env: { ...env, ...tokens } }, ["start"])
-        .result;
-      expect(status).toBe(0);
-      const agent = readFileSync(files.agent, "utf8");
-      expect(agent).not.toContain("lin-key");
-      expect(agent).not.toContain("t3-tok");
-    });
+  /** The lines `status` prints for where everything lives. */
+  const whereLines = (files: Record<string, string>) => [
+    `Config:      ${files.config}`,
+    `Credentials: ${files.credentials}`,
+    `State:       ${files.state}`,
+    `Log:         ${files.log}`,
+    `Unit:        ${files.agent}`,
+  ];
 
-    test("stop unloads the agent and disables it so it doesn't start at login", async () => {
-      const { cli, launchctl } = await installed();
-      const result = await cli("stop");
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(launchctl()).toEqual([`print ${target}`, `bootout ${target}`, `disable ${target}`]);
-    });
-
-    test("stop when already stopped only disables the agent", async () => {
-      const { cli, launchctl } = await installed("unloaded");
-      expect((await cli("stop")).status).toBe(0);
-      expect(launchctl()).toEqual([`print ${target}`, `disable ${target}`]);
-    });
-
-    test("restart kills and restarts a loaded agent", async () => {
-      const { cli, launchctl } = await installed();
-      expect(await cli("restart")).toMatchObject({ status: 0, stderr: "" });
-      expect(launchctl()).toEqual([`print ${target}`, `kickstart -k ${target}`]);
-    });
-
-    test("restart after stop enables and loads the agent again", async () => {
-      const { files, cli, launchctl } = await installed("unloaded");
-      expect(await cli("restart")).toMatchObject({ status: 0, stderr: "" });
-      expect(launchctl()).toEqual([
-        `print ${target}`,
-        `enable ${target}`,
-        `bootstrap gui/${uid} ${files.agent}`,
-      ]);
-    });
-
-    test("uninstall unloads and removes the agent but keeps Config, Credentials, State and log", async () => {
-      const { files, cli, launchctl } = await installed();
-      writeFile(files.state, "{}");
-      writeFile(files.log, "old output\n");
-      const result = await cli("uninstall");
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(launchctl()).toEqual([`print ${target}`, `bootout ${target}`]);
-      expect(existsSync(files.agent)).toBe(false);
-      for (const kept of [files.config, files.credentials, files.state, files.log]) {
-        expect(existsSync(kept)).toBe(true);
-      }
-    });
-
-    test.each(["stop", "restart", "logs", "uninstall"])(
-      "%s when the service isn't installed says so and exits non-zero",
-      async (command) => {
-        const { cli, launchctl } = await service();
-        const result = await cli(command);
-        expect(result.status).toBe(1);
-        expect(result.stderr).toContain(
-          "The Daemon isn't installed as a background service; run `linear-t3 start`",
-        );
-        expect(launchctl()).toEqual([]);
-      },
+  test("status shows a running Daemon's pid and uptime, and where everything lives", async () => {
+    const { files, cli } = await installed("running");
+    const result = await cli("status");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    const lines = result.stdout.trimEnd().split("\n");
+    expect(lines[0]).toMatch(
+      new RegExp(`^Daemon:      running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
     );
+    expect(lines.slice(1)).toEqual(whereLines(files));
+  });
 
-    /** The lines `status` prints for where everything lives. */
-    const whereLines = (files: Record<string, string>) => [
-      `Config:      ${files.config}`,
-      `Credentials: ${files.credentials}`,
-      `State:       ${files.state}`,
-      `Log:         ${files.log}`,
-      `Unit:        ${files.agent}`,
-    ];
-
-    test("status shows a running Daemon's pid and uptime, and where everything lives", async () => {
-      const { files, cli } = await installed("running");
-      const result = await cli("status");
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      const lines = result.stdout.trimEnd().split("\n");
-      expect(lines[0]).toMatch(
-        new RegExp(`^Daemon:      running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
-      );
-      expect(lines.slice(1)).toEqual(whereLines(files));
-    });
-
-    test.each(["stopped", "unloaded"] as const)(
-      "status shows an agent that is %s as stopped",
-      async (state) => {
-        const { files, cli } = await installed(state);
-        const result = await cli("status");
-        expect(result).toMatchObject({ status: 0, stderr: "" });
-        expect(result.stdout.trimEnd().split("\n")).toEqual([
-          "Daemon:      stopped",
-          ...whereLines(files),
-        ]);
-      },
-    );
-
-    test("status without the service says it isn't installed", async () => {
-      const { files, cli, launchctl } = await service();
+  test.each(["stopped", "unloaded"] as const)(
+    "status shows an agent that is %s as stopped",
+    async (state) => {
+      const { files, cli } = await installed(state);
       const result = await cli("status");
       expect(result).toMatchObject({ status: 0, stderr: "" });
       expect(result.stdout.trimEnd().split("\n")).toEqual([
-        "Daemon:      not installed, run `linear-t3 start`",
+        "Daemon:      stopped",
         ...whereLines(files),
       ]);
-      expect(launchctl()).toEqual([]);
-    });
+    },
+  );
 
-    test("status shows the State path the Config sets", async () => {
-      const { files, cli } = await installed("running");
-      const config = JSON.parse(readFileSync(files.config, "utf8"));
-      writeFile(files.config, JSON.stringify({ ...config, stateFile: "data/state.json" }));
-      const result = await cli("status");
-      expect(result.stdout).toContain(
-        `State:       ${join(dirname(files.config), "data", "state.json")}\n`,
-      );
-    });
+  test("status without the service says it isn't installed", async () => {
+    const { files, cli, launchctl } = await service();
+    const result = await cli("status");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout.trimEnd().split("\n")).toEqual([
+      "Daemon:      not installed, run `linear-t3 start`",
+      ...whereLines(files),
+    ]);
+    expect(launchctl()).toEqual([]);
+  });
 
-    test("status warns when the node binary the agent runs no longer exists", async () => {
-      const { files, cli } = await installed("unloaded");
-      const gone = join(tmpdir(), "linear-t3-gone", "node");
-      writeFileSync(
-        files.agent,
-        readFileSync(files.agent, "utf8").replace(
-          `<string>${process.execPath}</string>`,
-          `<string>${gone}</string>`,
-        ),
-      );
-      const result = await cli("status");
-      expect(result.status).toBe(0);
-      expect(result.stderr).toContain(
-        `The Daemon runs ${gone}, which no longer exists; run \`linear-t3 start\` again to use this node`,
-      );
-    });
+  test("status shows the State path the Config sets", async () => {
+    const { files, cli } = await installed("running");
+    const config = JSON.parse(readFileSync(files.config, "utf8"));
+    writeFile(files.config, JSON.stringify({ ...config, stateFile: "data/state.json" }));
+    const result = await cli("status");
+    expect(result.stdout).toContain(
+      `State:       ${join(dirname(files.config), "data", "state.json")}\n`,
+    );
+  });
 
-    test("logs prints the log file", async () => {
-      const { files, cli } = await installed();
-      writeFile(files.log, "first\nsecond\n");
-      expect(await cli("logs")).toEqual({ status: 0, stdout: "first\nsecond\n", stderr: "" });
-    });
+  test("status warns when the node binary the agent runs no longer exists", async () => {
+    const { files, cli } = await installed("unloaded");
+    const gone = join(tmpdir(), "linear-t3-gone", "node");
+    writeFileSync(
+      files.agent,
+      readFileSync(files.agent, "utf8").replace(
+        `<string>${process.execPath}</string>`,
+        `<string>${gone}</string>`,
+      ),
+    );
+    const result = await cli("status");
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain(
+      `The Daemon runs ${gone}, which no longer exists; run \`linear-t3 start\` again to use this node`,
+    );
+  });
 
-    test("logs before the Daemon wrote anything says where the log will be", async () => {
-      const { files, cli } = await installed();
-      const result = await cli("logs");
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(result.stdout).toContain(`No logs yet at ${files.log}`);
-    });
+  test("logs prints the log file", async () => {
+    const { files, cli } = await installed();
+    writeFile(files.log, "first\nsecond\n");
+    expect(await cli("logs")).toEqual({ status: 0, stdout: "first\nsecond\n", stderr: "" });
+  });
 
-    test("logs -f keeps printing what the Daemon writes", async () => {
-      const { env, files } = await installed();
-      writeFile(files.log, "before\n");
-      const cli = startCli({ cwd: tmpdir(), env }, ["logs", "-f"]);
-      let seen = "";
-      await new Promise<void>((resolve) =>
-        cli.child.stdout!.on("data", (data: Buffer) => {
-          seen += data.toString();
-          if (seen === "before\n") appendFileSync(files.log, "after\n");
-          if (seen.includes("after\n")) resolve();
-        }),
-      );
-      cli.child.kill("SIGINT");
-      expect((await cli.result).stdout).toBe("before\nafter\n");
-    });
-  },
-);
+  test("logs before the Daemon wrote anything says where the log will be", async () => {
+    const { files, cli } = await installed();
+    const result = await cli("logs");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).toContain(`No logs yet at ${files.log}`);
+  });
+
+  test("logs -f keeps printing what the Daemon writes", async () => {
+    const { env, files } = await installed();
+    writeFile(files.log, "before\n");
+    const cli = startCli({ cwd: tmpdir(), env }, ["logs", "-f"]);
+    let seen = "";
+    await new Promise<void>((resolve) =>
+      cli.child.stdout!.on("data", (data: Buffer) => {
+        seen += data.toString();
+        if (seen === "before\n") appendFileSync(files.log, "after\n");
+        if (seen.includes("after\n")) resolve();
+      }),
+    );
+    cli.child.kill("SIGINT");
+    expect((await cli.result).stdout).toBe("before\nafter\n");
+  });
+});

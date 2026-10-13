@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import { loadConfig } from "./config.ts";
 import type { CheckResult } from "./connect.ts";
 import { checkT3Token, t3BaseUrl } from "./connect-t3.ts";
-import { requireToken } from "./daemon.ts";
 import { EnvFile } from "./env-file.ts";
 import type { Paths } from "./paths.ts";
 import { checkLinear } from "./token-check.ts";
@@ -28,8 +27,9 @@ async function checkToken(
 }
 
 /**
- * Everything that would stop the Daemon from starting: a missing or invalid Config, a missing
- * token, or a token its Integration rejects or can't check. Each problem names its fix.
+ * Everything that would stop the background Daemon from starting: a missing or invalid Config, a
+ * token missing from the Credentials, or one its Integration rejects or can't check. Each problem
+ * names its fix.
  */
 export async function preflight(paths: Paths): Promise<string[]> {
   const problems: string[] = [];
@@ -47,13 +47,17 @@ export async function preflight(paths: Paths): Promise<string[]> {
   }
 
   const credentials = new EnvFile(paths.credentials);
+  // The service gets no tokens from this environment, so the Daemon only has the Credentials.
   const token = (key: string, integration: string) => {
-    try {
-      return requireToken(key, credentials, integration);
-    } catch (error) {
-      problems.push(message(error));
-      return undefined;
-    }
+    const value = credentials.get(key);
+    if (value) return value;
+    const fix = `run \`linear-t3 connect ${integration}\``;
+    problems.push(
+      process.env[key]
+        ? `${key} is only set in the environment, which the background service doesn't get: ${fix}`
+        : `Missing ${key}: ${fix}`,
+    );
+    return undefined;
   };
   const t3Token = token("T3_TOKEN", "t3");
   const linearKey = token("LINEAR_API_KEY", "linear");

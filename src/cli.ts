@@ -128,7 +128,7 @@ async function runDaemonCommand({ once = false, dryRun = false }): Promise<void>
 }
 
 /** Runs a background service command, printing a `ServiceError` and exiting 1 on failure. */
-async function service(work: () => Promise<void>): Promise<void> {
+async function exitOnServiceError(work: () => Promise<void>): Promise<void> {
   try {
     await work();
   } catch (error) {
@@ -141,20 +141,21 @@ async function service(work: () => Promise<void>): Promise<void> {
 const cliPath = fileURLToPath(import.meta.url);
 
 async function start(): Promise<void> {
-  const manager = serviceManager(paths());
+  const where = paths();
+  const manager = serviceManager(where);
   // npm can clean the npx cache at any time, which would leave the service pointing at nothing.
   if ([process.argv[1], cliPath].some((path) => path?.split(sep).includes("_npx"))) {
     throw new ServiceError(
       "linear-t3 is running from the npx cache, which npm may clean up. Install it first with `npm i -g linear-t3`, then run `linear-t3 start`",
     );
   }
-  const problems = await preflight(paths());
+  const problems = await preflight(where);
   if (problems.length > 0) {
     throw new ServiceError(
       ["The Daemon would not start, so it wasn't installed:", ...problems].join("\n"),
     );
   }
-  await manager.install(daemonUnit(paths(), cliPath));
+  await manager.install(daemonUnit(where, cliPath));
   console.log(`Started the Daemon (launchd agent ${manager.unitPath})`);
 }
 
@@ -252,34 +253,34 @@ program
 program
   .command("start")
   .description("install and start the Daemon as a background service; safe to run again")
-  .action(() => service(start));
+  .action(() => exitOnServiceError(start));
 
 program
   .command("stop")
   .description("stop the Daemon and keep it from starting at login")
-  .action(() => service(stop));
+  .action(() => exitOnServiceError(stop));
 
 program
   .command("restart")
   .description("restart the Daemon, e.g. to pick up Config changes")
-  .action(() => service(restart));
+  .action(() => exitOnServiceError(restart));
 
 program
   .command("status")
   .description("show whether the Daemon is running and where its files are")
-  .action(() => service(status));
+  .action(() => exitOnServiceError(status));
 
 program
   .command("logs")
   .description("show the Daemon's recent output")
   .option("-f, --follow", "keep printing new output")
-  .action((options: { follow?: boolean }) => service(() => logs(options)));
+  .action((options: { follow?: boolean }) => exitOnServiceError(() => logs(options)));
 
 program
   .command("uninstall")
   .description(
     "stop the Daemon and remove the background service; keeps Config, Credentials and State",
   )
-  .action(() => service(uninstall));
+  .action(() => exitOnServiceError(uninstall));
 
 await program.parseAsync();

@@ -38,9 +38,9 @@ export interface ServiceManager {
 export class ServiceError extends Error {}
 
 /** The service manager for this platform. */
-export function serviceManager(paths: Paths, platform = process.platform): ServiceManager {
-  if (platform === "darwin") return launchd(paths);
-  if (platform === "linux") {
+export function serviceManager(paths: Paths): ServiceManager {
+  if (process.platform === "darwin") return launchd(paths);
+  if (process.platform === "linux") {
     throw new ServiceError(
       "The background service isn't available on Linux yet; run `linear-t3 run` under your own supervisor for now",
     );
