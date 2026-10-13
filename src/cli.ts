@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import * as clack from "@clack/prompts";
 import { Argument, Command } from "commander";

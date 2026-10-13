@@ -8,7 +8,7 @@ A small daemon that polls Linear for issues that match your filters and starts a
 - After a thread starts, the daemon can comment on the issue with the thread link and move the issue to another workflow state.
 - Launched issues are recorded in the State file, so restarting the daemon never starts the same issue twice.
 
-It is written in TypeScript, uses the official [`@linear/sdk`](https://github.com/linear/linear/tree/master/packages/sdk), and runs directly on Node 22.18+, 24.11+ or 26+ using built-in type stripping, so there is no build step.
+It is written in TypeScript, uses the official [`@linear/sdk`](https://github.com/linear/linear/tree/master/packages/sdk), and runs from source on Node 22.18+, 24.11+ or 26+ using built-in type stripping. `pnpm build` bundles the CLI into `dist/cli.js` for publishing.
 
 ## Setup
 
