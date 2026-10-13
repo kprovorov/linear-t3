@@ -32,7 +32,7 @@ describe("cli", () => {
       expect(result.stdout).toMatch(/^Usage: linear-t3 /);
       expect(result.stdout).toContain("-V, --version");
       expect(result.stdout).toContain("-h, --help");
-      expect(result.stdout).toMatch(/^\s+connect \[service\]/m);
+      expect(result.stdout).toMatch(/^\s+connect \[integration\]/m);
     },
   );
 
@@ -43,7 +43,7 @@ describe("cli", () => {
     expect(result.stderr).toContain("unknown option '--bogus'");
   });
 
-  test("connect with an unknown service prints a usage error naming the valid ones", () => {
+  test("connect with an unknown integration prints a usage error naming the valid ones", () => {
     const result = runCli("connect", "github");
     expect(result.status).not.toBe(0);
     expect(result.stdout).toBe("");

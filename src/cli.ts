@@ -6,12 +6,12 @@ import {
   CancelledError,
   ConnectError,
   type Outcome,
-  type PendingService,
-  type Service,
+  type PendingIntegration,
+  type Integration,
   type Ui,
   connect,
 } from "./connect.ts";
-import { t3BaseUrl, t3Service } from "./connect-t3.ts";
+import { t3BaseUrl, t3Integration } from "./connect-t3.ts";
 import { EnvFile } from "./env-file.ts";
 import { checkLinear } from "./token-check.ts";
 
@@ -19,7 +19,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
   version: string;
 };
 
-const linear: Service = {
+const linear: Integration = {
   name: "Linear",
   envKey: "LINEAR_API_KEY",
   obtain: (ui) =>
@@ -37,14 +37,14 @@ const linear: Service = {
 const configPath = (env: EnvFile) =>
   resolve(process.env.CONFIG_PATH ?? env.get("CONFIG_PATH") ?? "config.json");
 
-/** Every service `connect` knows about, in the order plain `connect` runs them. */
-const services = {
-  t3: async (env) => t3Service({ baseUrl: await t3BaseUrl(configPath(env)) }),
+/** Every integration `connect` knows about, in the order plain `connect` runs them. */
+const integrations = {
+  t3: async (env) => t3Integration({ baseUrl: await t3BaseUrl(configPath(env)) }),
   linear: async () => linear,
-} satisfies Record<string, (env: EnvFile) => Promise<Service | PendingService>>;
+} satisfies Record<string, (env: EnvFile) => Promise<Integration | PendingIntegration>>;
 
-type ServiceName = keyof typeof services;
-const serviceNames = Object.keys(services) as ServiceName[];
+type IntegrationName = keyof typeof integrations;
+const integrationNames = Object.keys(integrations) as IntegrationName[];
 
 const clackUi: Ui = {
   async confirm(message) {
@@ -78,17 +78,17 @@ const clackUi: Ui = {
 
 function summary(outcome: Outcome): string {
   const who = outcome.identity ? `, authenticated as ${outcome.identity}` : "";
-  return `${outcome.service}: ${outcome.action === "saved" ? "token saved" : "kept existing token"}${who}`;
+  return `${outcome.integration}: ${outcome.action === "saved" ? "token saved" : "kept existing token"}${who}`;
 }
 
-async function runConnect(service: ServiceName | undefined): Promise<void> {
+async function runConnect(integration: IntegrationName | undefined): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error("connect is interactive, run it in a terminal");
     process.exit(1);
   }
   const env = new EnvFile(resolve(".env"), resolve(".env.example"));
   const selected = await Promise.all(
-    (service ? [service] : serviceNames).map((name) => services[name](env)),
+    (integration ? [integration] : integrationNames).map((name) => integrations[name](env)),
   );
 
   clack.intro("linear-t3 connect");
@@ -115,8 +115,8 @@ program
   .command("connect")
   .description("check and save the T3 and Linear tokens in ./.env")
   .addArgument(
-    new Argument("[service]", "connect only this service (default: all, in order)").choices(
-      serviceNames,
+    new Argument("[integration]", "connect only this integration (default: all, in order)").choices(
+      integrationNames,
     ),
   )
   .action(runConnect);
