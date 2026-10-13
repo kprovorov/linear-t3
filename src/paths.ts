@@ -15,7 +15,8 @@ function xdgDir(env: Env, variable: string, fallback: string): string {
   return join(home(env), fallback);
 }
 
-const configDir = (env: Env) => join(xdgDir(env, "XDG_CONFIG_HOME", ".config"), APP);
+const xdgConfig = (env: Env) => xdgDir(env, "XDG_CONFIG_HOME", ".config");
+const configDir = (env: Env) => join(xdgConfig(env), APP);
 const stateDir = (env: Env) => join(xdgDir(env, "XDG_STATE_HOME", ".local/state"), APP);
 
 /** Where linear-t3 keeps its files, resolved from the environment. */
@@ -30,6 +31,8 @@ export interface Paths {
   log: string;
   /** The launchd agent that runs the Daemon on macOS. */
   launchAgent: string;
+  /** The systemd user unit that runs the Daemon on Linux. */
+  systemdUnit: string;
 }
 
 export function resolvePaths(configFlag?: string, env: Env = process.env): Paths {
@@ -39,6 +42,7 @@ export function resolvePaths(configFlag?: string, env: Env = process.env): Paths
     defaultState: join(stateDir(env), "state.json"),
     log: join(stateDir(env), "daemon.log"),
     launchAgent: join(home(env), "Library", "LaunchAgents", `${APP}.plist`),
+    systemdUnit: join(xdgConfig(env), "systemd", "user", `${APP}.service`),
   };
 }
 
