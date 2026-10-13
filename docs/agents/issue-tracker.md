@@ -25,6 +25,22 @@ or moving a WF issue, check whether that would make the daemon pick it up.
 
 Create a Linear issue in the Workflow team.
 
+## Specs (e.g. `/to-spec`)
+
+A spec becomes a **Linear project**, not an issue:
+
+- `save_project` with `name`, `addTeams: ["Workflow"]`, `lead: "me"`. Put the full spec in `description` and a one-line `summary` (max 255 chars).
+- Don't add project labels. Triage labels are issue labels and don't apply to projects.
+- Issues implementing the spec go in that project (`save_issue` with `project`).
+
+## Human-only steps
+
+Anything an agent can't do itself (creating tokens or secrets, configuring third-party dashboards, first manual publishes, migrating someone's own machine, and so on) gets its **own issue**, never a line buried in a spec or in an agent issue:
+
+- Label it `ready-for-human`, and put it in the same project when there is one.
+- Write concrete steps and a "Done when" check.
+- Wire up the order with native relations (`blockedBy` / `blocks`): block the human issue on the work it needs, and block any agent issue that can't proceed until the human step is done. If a blocker isn't filed yet, say so in the description and add the relation once it is.
+
 ## When a skill says "fetch the relevant ticket"
 
 `get_issue` with the `WF-<n>` identifier, plus `list_comments`.
