@@ -3,7 +3,7 @@ import type { EnvFile } from "./env-file.ts";
 export type Failure = { status: "unauthorized" | "unreachable"; message?: string };
 export type CheckResult = { status: "valid"; identity?: string } | Failure;
 
-/** Which token a check was for: the one already in `.env`, or one just obtained. */
+/** Which token a check was for: the one already saved, or one just obtained. */
 export type Step = "existing" | "new";
 
 /** On a failed check: get another new token, or stop connecting this integration with an error. */
@@ -13,7 +13,7 @@ export type FailureAction = "obtain" | "abort";
 export interface Integration {
   /** Display name, e.g. "T3". */
   name: string;
-  /** The `.env` key the token is saved under. */
+  /** The Credentials key the token is saved under. */
   envKey: string;
   /** Gets a new token, e.g. by prompting for it or issuing one. */
   obtain(ui: Ui): Promise<string>;
@@ -59,7 +59,7 @@ function describeFailure(name: string, result: Failure): string {
 }
 
 /**
- * Runs the shared connect flow for one integration: check the token already in `.env` and offer to
+ * Runs the shared connect flow for one integration: check the token already saved and offer to
  * keep it, otherwise get a new one and save it only once its check passes.
  */
 export async function connectIntegration(

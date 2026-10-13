@@ -1,5 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import * as clack from "@clack/prompts";
 import { Argument, Command } from "commander";
 import {
@@ -14,6 +13,7 @@ import {
 import { t3BaseUrl, t3Integration } from "./connect-t3.ts";
 import { runDaemon } from "./daemon.ts";
 import { EnvFile } from "./env-file.ts";
+import { resolvePaths } from "./paths.ts";
 import { checkLinear } from "./token-check.ts";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -34,20 +34,13 @@ const linear: Integration = {
     step === "existing" && result.status === "unreachable" ? "abort" : "obtain",
 };
 
-/** The Config file: `--config`, else `CONFIG_PATH` from the environment or `.env`. */
-const configPath = (env?: EnvFile) =>
-  resolve(
-    program.opts<{ config?: string }>().config ??
-      process.env.CONFIG_PATH ??
-      env?.get("CONFIG_PATH") ??
-      "config.json",
-  );
+const paths = () => resolvePaths(program.opts<{ config?: string }>().config);
 
 /** Every integration `connect` knows about, in the order plain `connect` runs them. */
 const integrations = {
-  t3: async (env) => t3Integration({ baseUrl: await t3BaseUrl(configPath(env)) }),
+  t3: async () => t3Integration({ baseUrl: await t3BaseUrl(paths().config) }),
   linear: async () => linear,
-} satisfies Record<string, (env: EnvFile) => Promise<Integration | PendingIntegration>>;
+} satisfies Record<string, () => Promise<Integration | PendingIntegration>>;
 
 type IntegrationName = keyof typeof integrations;
 const integrationNames = Object.keys(integrations) as IntegrationName[];
@@ -92,16 +85,16 @@ async function runConnect(integration: IntegrationName | undefined): Promise<voi
     console.error("connect is interactive, run it in a terminal");
     process.exit(1);
   }
-  const env = new EnvFile(resolve(".env"), resolve(".env.example"));
+  const credentials = new EnvFile(paths().credentials);
   const selected = await Promise.all(
-    (integration ? [integration] : integrationNames).map((name) => integrations[name](env)),
+    (integration ? [integration] : integrationNames).map((name) => integrations[name]()),
   );
 
   clack.intro("linear-t3 connect");
   try {
-    const outcomes = await connect(selected, env, clackUi);
+    const outcomes = await connect(selected, credentials, clackUi);
     const saved = outcomes.some((outcome) => outcome.action === "saved");
-    const where = saved ? `Saved to ${env.path}` : `${env.path} unchanged`;
+    const where = saved ? `Saved to ${credentials.path}` : `${credentials.path} unchanged`;
     clack.outro([...outcomes.map(summary), where].join("\n"));
   } catch (error) {
     if (error instanceof CancelledError) {
@@ -116,12 +109,10 @@ async function runConnect(integration: IntegrationName | undefined): Promise<voi
 }
 
 async function runDaemonCommand({ once = false, dryRun = false }): Promise<void> {
-  // Tokens (and CONFIG_PATH) still come from ./.env for now; variables already set win.
-  if (existsSync(".env")) process.loadEnvFile(".env");
   try {
     // A dry run only lists issues, so polling again would just list them again.
     await runDaemon({
-      configPath: configPath(),
+      paths: paths(),
       once: once || dryRun,
       dryRun,
     });
@@ -133,14 +124,19 @@ async function runDaemonCommand({ once = false, dryRun = false }): Promise<void>
 
 const program = new Command("linear-t3")
   .version(pkg.version)
-  .option("--config <path>", "the Config file (default: $CONFIG_PATH or ./config.json)")
+  .option(
+    "--config <path>",
+    "the Config file (default: $LINEAR_T3_CONFIG or $XDG_CONFIG_HOME/linear-t3/config.json)",
+  )
   // Subcommand help lists --config too; set before adding commands so they inherit it.
   .configureHelp({ showGlobalOptions: true })
   .action(() => program.help());
 
 program
   .command("connect")
-  .description("check and save the T3 and Linear tokens in ./.env")
+  .description(
+    "check and save the T3 and Linear tokens in the Credentials file ($XDG_CONFIG_HOME/linear-t3/credentials)",
+  )
   .addArgument(
     new Argument("[integration]", "connect only this integration (default: all, in order)").choices(
       integrationNames,

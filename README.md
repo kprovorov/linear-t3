@@ -6,7 +6,7 @@ A small daemon that polls Linear for issues that match your filters and starts a
 
 - Each T3 project sets its Linear team and can set the Linear issue filter, what to do in Linear after launch, and how threads start. Anything a project leaves out comes from the shared `defaults` section. Thread options are the workspace (a git worktree per issue on the issue's Linear branch name, or the main checkout), runtime mode, interaction mode, model, and prompt template.
 - After a thread starts, the daemon can comment on the issue with the thread link and move the issue to another workflow state.
-- Launched issues are recorded in `state.json`, so restarting the daemon never starts the same issue twice.
+- Launched issues are recorded in the State file, so restarting the daemon never starts the same issue twice.
 
 It is written in TypeScript, uses the official [`@linear/sdk`](https://github.com/linear/linear/tree/master/packages/sdk), and runs directly on Node 22.18+, 24.11+ or 26+ using built-in type stripping, so there is no build step.
 
@@ -14,16 +14,23 @@ It is written in TypeScript, uses the official [`@linear/sdk`](https://github.co
 
 ```sh
 pnpm install
-cp config.example.json config.json   # edit projects, teams and filters
-pnpm cli connect t3                  # issues a T3 token, checks it and saves it to .env
-pnpm cli connect linear              # asks for a Linear API key, checks it and saves it to .env
+mkdir -p ~/.config/linear-t3
+cp config.example.json ~/.config/linear-t3/config.json   # edit projects, teams and filters
+pnpm cli connect t3       # issues a T3 token, checks it and saves it to the Credentials file
+pnpm cli connect linear   # asks for a Linear API key, checks it and saves it to the Credentials file
 ```
 
-`connect t3` runs `t3 auth session issue` for you, checks the token against the T3 server at `t3.url` from `config.json` (default `http://127.0.0.1:3773`) and saves it as `T3_TOKEN` in `./.env` only if the check passes. If the saved token still works, it asks before replacing it. The T3 server has to be running and the `t3` CLI has to be on your `PATH`. To do it by hand instead, run `t3 auth session issue --label linear-t3 --ttl 365d --token-only` and paste the token into `T3_TOKEN`.
+Every command works from any directory, because linear-t3 keeps its files in [XDG](https://specifications.freedesktop.org/basedir-spec/latest/) locations:
 
-`connect linear` asks for a Linear personal API key (Linear → Settings → Security & access → Personal API keys), checks it against Linear and saves it as `LINEAR_API_KEY` in `./.env` only if the check passes. It creates `.env` from `.env.example` if needed, writes it with mode `0600` and leaves every other line alone. If the saved key still works, it asks before replacing it.
+| File        | Location                                                                                                                                    |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Config      | `--config <path>`, else `$LINEAR_T3_CONFIG`, else `$XDG_CONFIG_HOME/linear-t3/config.json` (default `~/.config/linear-t3/...`)              |
+| Credentials | `$XDG_CONFIG_HOME/linear-t3/credentials`, `KEY=value` lines, mode `0600`                                                                    |
+| State       | `stateFile` from the Config, relative to the Config's directory, else `$XDG_STATE_HOME/linear-t3/state.json` (default `~/.local/state/...`) |
 
-To set the key up by hand instead, `cp .env.example .env` and paste the key into `LINEAR_API_KEY`.
+`connect t3` runs `t3 auth session issue` for you, checks the token against the T3 server at `t3.url` from the Config (default `http://127.0.0.1:3773`) and saves it as `T3_TOKEN` in the Credentials file only if the check passes. If the saved token still works, it asks before replacing it. The T3 server has to be running and the `t3` CLI has to be on your `PATH`. To do it by hand instead, run `t3 auth session issue --label linear-t3 --ttl 365d --token-only` and put the token in the Credentials file as `T3_TOKEN=...`.
+
+`connect linear` asks for a Linear personal API key (Linear → Settings → Security & access → Personal API keys), checks it against Linear and saves it as `LINEAR_API_KEY` in the Credentials file only if the check passes. It writes the file with mode `0600` and leaves every other line alone. If the saved key still works, it asks before replacing it.
 
 Check the CLI works with `pnpm cli --version`.
 
@@ -35,7 +42,7 @@ pnpm cli run --once       # one real poll, then exit
 pnpm cli run              # run continuously until SIGINT/SIGTERM
 ```
 
-`run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment or from `./.env`, and the Config from `--config <path>`, `CONFIG_PATH` or `./config.json`. On SIGINT or SIGTERM it lets the current launch finish and starts nothing new.
+`run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment, else from the Credentials file. On SIGINT or SIGTERM it lets the current launch finish and starts nothing new.
 
 The project uses [Vite+](https://viteplus.dev) for formatting, linting, type checking and tests:
 
@@ -53,6 +60,7 @@ See `config.example.json`. The main keys:
 | --------------------- | ------------------------------------------------------------------------------------------ |
 | `pollIntervalSeconds` | How often to poll Linear. Default `60`.                                                    |
 | `maxLaunchesPerPoll`  | Maximum number of threads started per poll. Default `5`.                                   |
+| `stateFile`           | Where State is kept, relative to the Config's directory. Default: the XDG State location.  |
 | `t3.url`              | T3 server URL. Default `http://127.0.0.1:3773`.                                            |
 | `t3.webUrl`           | Optional public T3 web URL. When set, the Linear comment includes a clickable thread link. |
 | `defaults`            | Settings shared by every project. Takes any project setting below except `linear.team`.    |

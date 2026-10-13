@@ -16,7 +16,7 @@ let env: EnvFile;
 
 beforeEach(() => {
   const dir = mkdtempSync(join(tmpdir(), "connect-"));
-  env = new EnvFile(join(dir, ".env"), join(dir, ".env.example"));
+  env = new EnvFile(join(dir, "credentials"));
 });
 
 const envContents = () => readFileSync(env.path, "utf8");
