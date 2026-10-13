@@ -1,7 +1,7 @@
 # Publishes the version on main to npm, then tags it and creates a GitHub release.
 #
-# npm trusts this workflow by its filename (trusted publishing, see WF-11), so don't rename it.
-# There is no npm token: `npm publish` swaps the job's OIDC token for a short-lived publish token.
+# npm trusts this workflow by its filename (trusted publishing), so don't rename it. There is no
+# npm token: `npm publish` (npm 11.5.1+) swaps the job's OIDC token for a short-lived publish token.
 name: Release
 
 on:
@@ -63,14 +63,6 @@ jobs:
             echo "::error::GitHub release v$VERSION already exists."
             exit 1
           fi
-      - name: Check npm supports trusted publishing
-        run: |
-          # Trusted publishing needs npm 11.5.1 or later.
-          node -e '
-            const [major, minor, patch] = process.argv[1].split(".").map(Number);
-            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
-            if (!ok) { console.error(`::error::npm ${process.argv[1]} is too old for trusted publishing, need 11.5.1+.`); process.exit(1); }
-          ' "$(npm --version)"
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm test
