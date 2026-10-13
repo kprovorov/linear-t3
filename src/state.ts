@@ -1,4 +1,5 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 export interface PendingActions {
   comment?: boolean;
@@ -48,6 +49,7 @@ export class StateStore {
   }
 
   private async save(): Promise<void> {
+    await mkdir(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.tmp`;
     await writeFile(tmp, JSON.stringify({ launched: this.launched }, null, 2));
     await rename(tmp, this.path);

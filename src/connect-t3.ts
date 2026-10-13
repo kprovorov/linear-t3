@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { DEFAULT_T3_URL } from "./config.ts";
-import { type CheckResult, ConnectError, type Service } from "./connect.ts";
+import { type CheckResult, ConnectError, type Integration } from "./connect.ts";
 import { describeTicketFailure, requestWebsocketTicket } from "./t3.ts";
 
 const CHECK_TIMEOUT_MS = 10_000;
@@ -72,21 +72,21 @@ export async function issueT3Token(bin = "t3"): Promise<string> {
   return token;
 }
 
-export interface T3ServiceOptions {
+export interface T3IntegrationOptions {
   baseUrl: string;
   check?: (token: string) => Promise<CheckResult>;
   issue?: () => Promise<string>;
 }
 
 /**
- * `connect`'s T3 service: issues tokens through the `t3` CLI and checks them against the server.
+ * `connect`'s T3 integration: issues tokens through the `t3` CLI and checks them against the server.
  * An unreachable server always aborts, and no token is issued until the server answers.
  */
-export function t3Service({
+export function t3Integration({
   baseUrl,
   check = (token) => checkT3Token(baseUrl, token),
   issue = () => issueT3Token(),
-}: T3ServiceOptions): Service {
+}: T3IntegrationOptions): Integration {
   return {
     name: "T3",
     envKey: "T3_TOKEN",

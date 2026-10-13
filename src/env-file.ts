@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 const isKeyLine = (line: string, key: string) => line.startsWith(`${key}=`);
 
@@ -21,17 +22,15 @@ export function upsertEnv(contents: string, updates: Record<string, string>): st
   return lines.length === 0 ? "" : `${lines.join("\n")}\n`;
 }
 
-/** A `.env` file that starts from `.env.example` and is always written with mode 0600. */
+/** A `KEY=value` file, such as the Credentials file, that is always written with mode 0600. */
 export class EnvFile {
   readonly path: string;
-  readonly examplePath: string;
 
-  constructor(path: string, examplePath: string) {
+  constructor(path: string) {
     this.path = path;
-    this.examplePath = examplePath;
   }
 
-  /** The key's value in `.env`, or `undefined` if the file or the key is missing or empty. */
+  /** The key's value in the file, or `undefined` if the file or the key is missing or empty. */
   get(key: string): string | undefined {
     if (!existsSync(this.path)) return undefined;
     let value: string | undefined;
@@ -47,8 +46,8 @@ export class EnvFile {
       // Tighten an existing file before the new secret goes in; `mode` below only applies on create.
       chmodSync(this.path, 0o600);
       current = readFileSync(this.path, "utf8");
-    } else if (existsSync(this.examplePath)) {
-      current = readFileSync(this.examplePath, "utf8");
+    } else {
+      mkdirSync(dirname(this.path), { recursive: true });
     }
     writeFileSync(this.path, upsertEnv(current, updates), { mode: 0o600 });
   }

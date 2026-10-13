@@ -13,7 +13,12 @@ function rootMessage(error: unknown): string {
 /** Checks a Linear API key by asking Linear who it belongs to. */
 export async function checkLinear(apiKey: string): Promise<CheckResult> {
   // The SDK spreads unknown options into every fetch call, so this times out the request.
-  const client = new LinearClient({ apiKey, signal: AbortSignal.timeout(LINEAR_TIMEOUT_MS) });
+  // LINEAR_API_URL points the check at another GraphQL endpoint, as it does for the Daemon.
+  const client = new LinearClient({
+    apiKey,
+    apiUrl: process.env.LINEAR_API_URL || undefined,
+    signal: AbortSignal.timeout(LINEAR_TIMEOUT_MS),
+  });
   try {
     const viewer = await client.viewer;
     return { status: "valid", identity: `${viewer.name} (${viewer.email})` };

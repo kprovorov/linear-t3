@@ -21,12 +21,21 @@ async function listen(server: Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
-/** A Linear GraphQL API that answers every issue query with `issues`. */
+/** A Linear GraphQL API that answers the viewer query with a fixed user and every other query with `issues`. */
 export async function fakeLinear(issues: FakeIssue[]) {
   const queries: string[] = [];
+  // The API key each request was sent with.
+  const apiKeys: (string | undefined)[] = [];
   const server = createServer(async (req, res) => {
     const { query } = JSON.parse(await readBody(req)) as { query: string };
     queries.push(query);
+    apiKeys.push(req.headers.authorization);
+    res.setHeader("content-type", "application/json");
+    if (/\bviewer\b/.test(query)) {
+      const viewer = { id: "user-1", name: "Ada", email: "ada@example.com" };
+      res.end(JSON.stringify({ data: { viewer } }));
+      return;
+    }
     const nodes = issues.map((issue) => ({
       ...issue,
       url: `https://linear.app/acme/issue/${issue.identifier}`,
@@ -38,7 +47,6 @@ export async function fakeLinear(issues: FakeIssue[]) {
       sharedAccess: { isShared: false, sharedWithCount: 0, sharedWithUsers: [] },
       reactions: [],
     }));
-    res.setHeader("content-type", "application/json");
     res.end(
       JSON.stringify({
         data: {
@@ -48,7 +56,7 @@ export async function fakeLinear(issues: FakeIssue[]) {
     );
   });
   const url = await listen(server);
-  return { url: `${url}/graphql`, queries, close: () => server.close() };
+  return { url: `${url}/graphql`, queries, apiKeys, close: () => server.close() };
 }
 
 // Just enough of RFC 6455 for one client: unfragmented text frames, client frames masked.

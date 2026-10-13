@@ -6,7 +6,7 @@ export const apps = [
     script: "src/cli.ts",
     args: "run",
     cwd: import.meta.dirname,
-    // `run` loads .env itself and Node strips TypeScript types natively; no build step.
+    // `run` finds the Config and Credentials in XDG locations and Node strips TypeScript types natively; no build step.
     // pm2 runs .ts scripts with Bun when it's installed, so pin Node.
     interpreter: "node",
     autorestart: true,
