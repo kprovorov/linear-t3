@@ -2,11 +2,11 @@
 
 # linear-t3
 
-A small daemon that polls Linear for issues that match your filters and starts a [T3 Code](https://t3.codes) thread for each one. It runs on the same machine as the T3 Code server.
+A small Daemon that polls Linear for issues that match your filters and starts a [T3 Code](https://t3.codes) thread for each one. It runs on the same machine as the T3 Code server.
 
 - Each T3 project sets its Linear team and can set the Linear issue filter, what to do in Linear after launch, and how threads start. Anything a project leaves out comes from the shared `defaults` section. Thread options are the workspace (a git worktree per issue on the issue's Linear branch name, or the main checkout), runtime mode, interaction mode, model, and prompt template.
-- After a thread starts, the daemon can comment on the issue with the thread link and move the issue to another workflow state.
-- Launched issues are recorded in the State file, so restarting the daemon never starts the same issue twice.
+- After a thread starts, the Daemon can comment on the issue with the thread link and move the issue to another workflow state.
+- Launched issues are recorded in the State file, so restarting the Daemon never starts the same issue twice.
 
 It runs on macOS and Linux with Node 22.18+, 24.11+ or 26+.
 
@@ -41,7 +41,7 @@ Every command takes `--config <path>` to use another Config.
 | `stop`                 | Stops the Daemon and keeps it from starting at login until the next `start`.                                                                                                    |
 | `restart`              | Restarts the Daemon, for example to pick up Config changes.                                                                                                                     |
 | `status`               | Shows whether the Daemon is running and where the Config, Credentials, State, log and unit are.                                                                                 |
-| `logs [-f]`            | Shows the Daemon's recent output. `-f` keeps printing new output.                                                                                                               |
+| `logs [-f]`            | Shows the Daemon's recent output. `-f` (`--follow`) keeps printing new output.                                                                                                  |
 | `uninstall`            | Stops the Daemon and removes the background service. The Config, Credentials and State are kept.                                                                                |
 
 ### `connect`
@@ -54,18 +54,18 @@ Both write the Credentials file with mode `0600` and leave every other line alon
 
 ### `run`
 
-`run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment, else from the Credentials file. On SIGINT or SIGTERM it lets the current launch finish and starts nothing new.
+`run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment, else from the Credentials file (see [Files](#files)). On SIGINT or SIGTERM it lets the current launch finish and starts nothing new.
 
 ### Background service
 
 `start` installs the Daemon with the OS service manager, which restarts it if it crashes and starts it at login:
 
-| Platform | Service                                                             | Log                                                |
-| -------- | ------------------------------------------------------------------- | -------------------------------------------------- |
-| macOS    | launchd agent `~/Library/LaunchAgents/linear-t3.plist`              | `$XDG_STATE_HOME/linear-t3/daemon.log`             |
-| Linux    | systemd user unit `$XDG_CONFIG_HOME/systemd/user/linear-t3.service` | the user journal: `journalctl --user -u linear-t3` |
+- macOS: a launchd agent, logging to a file.
+- Linux: a systemd user unit, logging to the user journal.
 
-The service runs `linear-t3 run` with the `node` that ran `start`, so run `start` again after switching Node versions; `status` warns when that `node` is gone. The service doesn't inherit your shell's environment, so it reads both tokens from the Credentials file only. `start` refuses to install it if either one is missing or rejected.
+See [Files](#files) for where the unit and log are; `status` prints both.
+
+The background service runs `linear-t3 run` with the `node` that ran `start`, so run `start` again after switching Node versions; `status` warns when that `node` is gone. It doesn't inherit your shell's environment, so it reads both tokens from the Credentials file only. `start` refuses to install it if either one is missing or rejected.
 
 On Linux, systemd stops user services when you log out unless lingering is on. To keep the Daemon running after you log out, or to start it at boot without logging in, run `loginctl enable-linger`. `status` reminds you while it's off.
 
@@ -83,7 +83,7 @@ linear-t3 keeps its files in [XDG](https://specifications.freedesktop.org/basedi
 | Log         | macOS: `$XDG_STATE_HOME/linear-t3/daemon.log`. Linux: the systemd user journal                                                              |
 | Unit        | macOS: `~/Library/LaunchAgents/linear-t3.plist`. Linux: `$XDG_CONFIG_HOME/systemd/user/linear-t3.service`                                   |
 
-`LINEAR_API_KEY` and `T3_TOKEN` in the environment take precedence over the Credentials file for `run`. `start` passes `--config`, `LINEAR_T3_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `T3CODE_HOME` on to the background service, so it finds the same files.
+`LINEAR_API_KEY` and `T3_TOKEN` in the environment take precedence over the Credentials file for `run`, but not for the background service, which only reads the Credentials. `T3CODE_HOME` (default `~/.t3`) is where the Daemon finds T3 Code's environment id for thread links when `t3.webUrl` is set. `start` passes `--config`, `LINEAR_T3_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `T3CODE_HOME` on to the background service, so it finds the same files.
 
 ## Configuration
 
@@ -115,12 +115,12 @@ Project settings. Each value comes from the project if it sets one, otherwise fr
 
 ## How it talks to T3 Code
 
-T3 Code has no public API for creating threads, so this daemon uses the same WebSocket RPC as the T3 web client. It was built against T3 Code `0.0.46-nightly.20261006` and updated for orchestration protocol 2 in `0.0.46-nightly.20261008`, whose server registers `orchestration.launchThread`, the same RPC behind T3's own `t3_thread_launch` tool. Other T3 versions may not expose these RPCs.
+T3 Code has no public API for creating threads, so the Daemon uses the same WebSocket RPC as the T3 web client. It was built against T3 Code `0.0.46-nightly.20261006` and updated for orchestration protocol 2 in `0.0.46-nightly.20261008`, whose server registers `orchestration.launchThread`, the same RPC behind T3's own `t3_thread_launch` tool. Other T3 versions may not expose these RPCs.
 
 1. It sends `POST /api/auth/websocket-ticket` with the bearer token and gets back a one-time ticket.
 2. It opens `ws://…/ws?wsTicket=…&orchestrationProtocol=2`, which speaks Effect RPC with JSON messages. Servers that require protocol 2 reject sockets that don't declare it with `426 orchestration_protocol_incompatible`.
 3. It calls `orchestration.subscribeShell`, takes the project list from the first snapshot, then interrupts the subscription.
-4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message. The command ID, thread ID and message ID are all derived from the Linear issue ID. T3 keeps a receipt for each command ID, so if the response to a launch is lost and the daemon retries with the same command ID, T3 returns the thread the first attempt created instead of creating a second one. The daemon does not send `reuseExistingThread`: in protocol 2 it means "start a run in an existing empty thread", and sending it for a new thread fails with `ProjectionStoreThreadNotFoundError`.
+4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message. The command ID, thread ID and message ID are all derived from the Linear issue ID. T3 keeps a receipt for each command ID, so if the response to a launch is lost and the Daemon retries with the same command ID, T3 returns the thread the first attempt created instead of creating a second one. The Daemon does not send `reuseExistingThread`: in protocol 2 it means "start a run in an existing empty thread", and sending it for a new thread fails with `ProjectionStoreThreadNotFoundError`.
 
 These RPCs are internal and could change in a future T3 Code release. Run `linear-t3 run --once` after updating T3 to confirm launches still work. The client is isolated in `src/t3.ts`.
 

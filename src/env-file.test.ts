@@ -26,9 +26,9 @@ describe("upsertEnv", () => {
   });
 
   test("leaves commented-out keys untouched", () => {
-    const before = "# OTHER_KEY=./config.json\n#T3_TOKEN=old\n";
-    expect(upsertEnv(before, { OTHER_KEY: "./other.json", T3_TOKEN: "new" })).toBe(
-      "# OTHER_KEY=./config.json\n#T3_TOKEN=old\nOTHER_KEY=./other.json\nT3_TOKEN=new\n",
+    const before = "# OTHER_KEY=old\n#T3_TOKEN=old\n";
+    expect(upsertEnv(before, { OTHER_KEY: "new", T3_TOKEN: "new" })).toBe(
+      "# OTHER_KEY=old\n#T3_TOKEN=old\nOTHER_KEY=new\nT3_TOKEN=new\n",
     );
   });
 
