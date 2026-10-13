@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
 import { DEFAULT_T3_URL } from "./config.ts";
-import { type CheckResult, ConnectError, type Ui, connectService } from "./connect.ts";
-import { checkT3Token, issueT3Token, t3BaseUrl, t3Service } from "./connect-t3.ts";
+import { type CheckResult, ConnectError, type Ui, connectIntegration } from "./connect.ts";
+import { checkT3Token, issueT3Token, t3BaseUrl, t3Integration } from "./connect-t3.ts";
 import { EnvFile } from "./env-file.ts";
 
 const BASE_URL = "http://t3.test:3773";
@@ -128,7 +128,7 @@ describe("issueT3Token", () => {
   });
 });
 
-describe("t3Service", () => {
+describe("t3Integration", () => {
   const ui = (replace = false): Ui => ({
     confirm: async () => replace,
     password: async () => {
@@ -145,7 +145,7 @@ describe("t3Service", () => {
     const env = new EnvFile(join(dir, ".env"), join(dir, ".env.example"));
     if (savedToken) writeFileSync(env.path, `T3_TOKEN=${savedToken}\n`);
     let issued = 0;
-    const service = t3Service({
+    const integration = t3Integration({
       baseUrl: BASE_URL,
       check: async (token) => {
         const result = results[token] ?? { status: "unauthorized" };
@@ -154,39 +154,43 @@ describe("t3Service", () => {
       },
       issue: async () => `new-${++issued}`,
     });
-    return { env, service, issued: () => issued, saved: () => env.get("T3_TOKEN") };
+    return { env, integration, issued: () => issued, saved: () => env.get("T3_TOKEN") };
   }
 
   const down: CheckResult = { status: "unreachable", message: "T3 not reachable at X" };
 
   test("issues a token, checks it and saves it as T3_TOKEN", async () => {
     const t = setup({ "new-1": { status: "valid" } });
-    expect(await connectService(t.service, t.env, ui())).toMatchObject({ action: "saved" });
+    expect(await connectIntegration(t.integration, t.env, ui())).toMatchObject({ action: "saved" });
     expect(t.saved()).toBe("new-1");
   });
 
   test("with no saved token and T3 down, fails without issuing a token", async () => {
     const t = setup({ "": down, "new-1": down });
-    await expect(connectService(t.service, t.env, ui())).rejects.toThrow("T3 not reachable at X");
+    await expect(connectIntegration(t.integration, t.env, ui())).rejects.toThrow(
+      "T3 not reachable at X",
+    );
     expect(t.issued()).toBe(0);
   });
 
   test("with a saved token and T3 down, fails without issuing a token", async () => {
     const t = setup({ old: down }, "old");
-    await expect(connectService(t.service, t.env, ui())).rejects.toThrow("T3 not reachable at X");
+    await expect(connectIntegration(t.integration, t.env, ui())).rejects.toThrow(
+      "T3 not reachable at X",
+    );
     expect(t.issued()).toBe(0);
     expect(t.saved()).toBe("old");
   });
 
   test("a rejected saved token leads to a new one being issued", async () => {
     const t = setup({ old: { status: "unauthorized" }, "new-1": { status: "valid" } }, "old");
-    await connectService(t.service, t.env, ui());
+    await connectIntegration(t.integration, t.env, ui());
     expect(t.saved()).toBe("new-1");
   });
 
   test("a valid saved token is kept by default", async () => {
     const t = setup({ old: { status: "valid" } }, "old");
-    expect(await connectService(t.service, t.env, ui())).toMatchObject({ action: "kept" });
+    expect(await connectIntegration(t.integration, t.env, ui())).toMatchObject({ action: "kept" });
     expect(t.issued()).toBe(0);
   });
 
@@ -195,13 +199,13 @@ describe("t3Service", () => {
       "": new ConnectError("T3 websocket ticket request failed (400)"),
       "new-1": { status: "valid" },
     });
-    await connectService(t.service, t.env, ui());
+    await connectIntegration(t.integration, t.env, ui());
     expect(t.saved()).toBe("new-1");
   });
 
   test("a newly issued token that is rejected aborts without saving", async () => {
     const t = setup({}, "old");
-    await expect(connectService(t.service, t.env, ui())).rejects.toThrow(ConnectError);
+    await expect(connectIntegration(t.integration, t.env, ui())).rejects.toThrow(ConnectError);
     expect(t.issued()).toBe(1);
     expect(t.saved()).toBe("old");
   });
