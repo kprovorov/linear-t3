@@ -100,3 +100,7 @@ T3 Code has no public API for creating threads, so this daemon uses the same Web
 4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message. The command ID, thread ID and message ID are all derived from the Linear issue ID. T3 keeps a receipt for each command ID, so if the response to a launch is lost and the daemon retries with the same command ID, T3 returns the thread the first attempt created instead of creating a second one. The daemon does not send `reuseExistingThread`: in protocol 2 it means "start a run in an existing empty thread", and sending it for a new thread fails with `ProjectionStoreThreadNotFoundError`.
 
 These RPCs are internal and could change in a future T3 Code release. Run `pnpm cli run --once` after updating T3 to confirm launches still work. The client is isolated in `src/t3.ts`.
+
+## Releasing
+
+Run the **Release** workflow from the Actions tab on `main`. It publishes the version in `package.json` to npm with provenance through npm trusted publishing (no npm token), then creates the `vX.Y.Z` tag and a GitHub release with generated notes. It fails before building if that version, tag or release already exists, so bump the version first. npm trusts the workflow by its filename, `.github/workflows/release.yml`, so don't rename it.
