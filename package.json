@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Daemon that polls Linear issues and launches T3 Code threads for them",
+  "files": [
+    "config.template.json"
+  ],
   "type": "module",
   "scripts": {
     "start": "node src/cli.ts run",
