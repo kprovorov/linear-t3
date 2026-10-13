@@ -1158,13 +1158,16 @@ WantedBy=default.target
 
   test("the unit escapes paths so systemd reads them back as written", async () => {
     const { env, files } = await service();
-    // A Config path with a space, a quote and the characters systemd would otherwise expand.
-    const config = join(mkdtempSync(join(tmpdir(), "linear-t3-odd-")), 'my "100%" $HOME', "c.json");
+    // A Config path with a space, a quote, a backslash and the characters systemd would otherwise
+    // expand.
+    const dir = mkdtempSync(join(tmpdir(), "linear-t3-odd-"));
+    const config = join(dir, 'my "100%" $HOME\\x', "c.json");
     writeFile(config, readFileSync(files.config, "utf8"));
     const { status } = await startCli({ cwd: tmpdir(), env }, ["--config", config, "start"]).result;
     expect(status).toBe(0);
-    const escaped = config.replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$");
-    expect(readFileSync(files.unit, "utf8")).toContain(`"--config" "${escaped}"\n`);
+    expect(readFileSync(files.unit, "utf8")).toContain(
+      `"--config" "${dir}/my \\"100%%\\" $$HOME\\\\x/c.json"\n`,
+    );
   });
 
   test("stop stops the Daemon and disables it so it doesn't start at login", async () => {
