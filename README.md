@@ -27,13 +27,15 @@ To set the key up by hand instead, `cp .env.example .env` and paste the key into
 
 Check the CLI works with `pnpm cli --version`.
 
-Try it without starting any threads:
+Try it without starting any threads, then run it for real. `pnpm start`, `pnpm once` and `pnpm dry-run` are shortcuts for these:
 
 ```sh
-pnpm dry-run    # lists the issues it would launch
-pnpm once       # one real poll, then exit
-pnpm start      # run continuously
+pnpm cli run --dry-run    # lists the issues it would launch, then exits
+pnpm cli run --once       # one real poll, then exit
+pnpm cli run              # run continuously until SIGINT/SIGTERM
 ```
+
+`run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment or from `./.env`, and the Config from `--config <path>`, `CONFIG_PATH` or `./config.json`. On SIGINT or SIGTERM it lets the current launch finish and starts nothing new.
 
 The project uses [Vite+](https://viteplus.dev) for formatting, linting, type checking and tests:
 
@@ -78,7 +80,7 @@ pm2 logs linear-t3
 pm2 save && pm2 startup   # restart on reboot
 ```
 
-`ecosystem.config.js`, which pm2 picks up from the current directory, runs `src/main.ts` directly with `--env-file=.env`. When pm2 stops the process, it lets the current launch finish before exiting.
+`ecosystem.config.js`, which pm2 picks up from the current directory, runs `src/cli.ts run` directly. When pm2 stops the process, it lets the current launch finish before exiting.
 
 ## How it talks to T3 Code
 
@@ -89,4 +91,4 @@ T3 Code has no public API for creating threads, so this daemon uses the same Web
 3. It calls `orchestration.subscribeShell`, takes the project list from the first snapshot, then interrupts the subscription.
 4. It calls `orchestration.launchThread` for each issue, with the project, model, workspace strategy and the initial message. The command ID, thread ID and message ID are all derived from the Linear issue ID. T3 keeps a receipt for each command ID, so if the response to a launch is lost and the daemon retries with the same command ID, T3 returns the thread the first attempt created instead of creating a second one. The daemon does not send `reuseExistingThread`: in protocol 2 it means "start a run in an existing empty thread", and sending it for a new thread fails with `ProjectionStoreThreadNotFoundError`.
 
-These RPCs are internal and could change in a future T3 Code release. Run `pnpm once` after updating T3 to confirm launches still work. The client is isolated in `src/t3.ts`.
+These RPCs are internal and could change in a future T3 Code release. Run `pnpm cli run --once` after updating T3 to confirm launches still work. The client is isolated in `src/t3.ts`.
