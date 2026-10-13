@@ -82,9 +82,6 @@ const Config = z
     pollIntervalSeconds: z.number().int().min(10).default(60),
     // Caps how many threads are started per poll so a broad filter can't flood T3.
     maxLaunchesPerPoll: z.number().int().min(1).default(5),
-    // Between full scans, polls only read recently updated issues. Full scans catch issues that start
-    // matching without being updated themselves (e.g. a referenced label or state is renamed).
-    fullScanIntervalMinutes: z.number().min(1).default(60),
     stateFile: z.string().default("./state.json"),
     t3: z
       .object({

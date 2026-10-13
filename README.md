@@ -47,15 +47,14 @@ pnpm test           # run the tests
 
 See `config.example.json`. The main keys:
 
-| Key                       | Description                                                                                                             |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `pollIntervalSeconds`     | How often to poll Linear. Default `60`.                                                                                 |
-| `maxLaunchesPerPoll`      | Maximum number of threads started per poll. Default `5`.                                                                |
-| `fullScanIntervalMinutes` | How often each project re-reads every matching issue. Default `60`. Polls in between only read recently updated issues. |
-| `t3.url`                  | T3 server URL. Default `http://127.0.0.1:3773`.                                                                         |
-| `t3.webUrl`               | Optional public T3 web URL. When set, the Linear comment includes a clickable thread link.                              |
-| `defaults`                | Settings shared by every project. Takes any project setting below except `linear.team`.                                 |
-| `projects`                | One entry per T3 project. The key is the T3 project id, title or workspace path.                                        |
+| Key                   | Description                                                                                |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| `pollIntervalSeconds` | How often to poll Linear. Default `60`.                                                    |
+| `maxLaunchesPerPoll`  | Maximum number of threads started per poll. Default `5`.                                   |
+| `t3.url`              | T3 server URL. Default `http://127.0.0.1:3773`.                                            |
+| `t3.webUrl`           | Optional public T3 web URL. When set, the Linear comment includes a clickable thread link. |
+| `defaults`            | Settings shared by every project. Takes any project setting below except `linear.team`.    |
+| `projects`            | One entry per T3 project. The key is the T3 project id, title or workspace path.           |
 
 Project settings. Each value comes from the project if it sets one, otherwise from `defaults`, otherwise from the built-in default below. Objects (`workspace`, `model`, `linear.filter`) are replaced as a whole, but `linear.onLaunch` is merged key by key, so a project can set only `moveToState` and keep the shared `comment`.
 
