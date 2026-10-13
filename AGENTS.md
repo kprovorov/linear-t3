@@ -14,3 +14,7 @@ The five canonical triage labels, used as-is (`needs-triage`, `needs-info`, `rea
 ### Domain docs
 
 Single-context: one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Pull requests
+
+PR titles are Conventional Commits, e.g. `feat(WF-15): pick the version bump from commit history`. Add `!` after the type or scope for a breaking change. PRs are squash-merged, so the title becomes the commit subject the "Bump version" workflow reads: `!` → major, `feat` → minor, anything else → patch. A `BREAKING CHANGE:` footer is ignored. `.github/workflows/pr-title.yml` enforces this and lists the allowed types.
