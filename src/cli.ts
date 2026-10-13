@@ -6,8 +6,8 @@ import {
   CancelledError,
   ConnectError,
   type Outcome,
-  type PendingIntegration,
   type Integration,
+  type PendingIntegration,
   type Ui,
   connect,
 } from "./connect.ts";

@@ -6,7 +6,7 @@ export type CheckResult = { status: "valid"; identity?: string } | Failure;
 /** Which token a check was for: the one already in `.env`, or one just obtained. */
 export type Step = "existing" | "new";
 
-/** On a failed check: get a (another) new token, or stop connecting this integration with an error. */
+/** On a failed check: get another new token, or stop connecting this integration with an error. */
 export type FailureAction = "obtain" | "abort";
 
 /** An integration `connect` can set up: where its token lives, how to get one and how to check it. */
