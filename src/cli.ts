@@ -35,11 +35,11 @@ const linear: Service = {
 };
 
 /** The Config file: `--config`, else `CONFIG_PATH` from the environment or `.env`. */
-const configPath = (env: EnvFile) =>
+const configPath = (env?: EnvFile) =>
   resolve(
     program.opts<{ config?: string }>().config ??
       process.env.CONFIG_PATH ??
-      env.get("CONFIG_PATH") ??
+      env?.get("CONFIG_PATH") ??
       "config.json",
   );
 
@@ -115,13 +115,13 @@ async function runConnect(service: ServiceName | undefined): Promise<void> {
   }
 }
 
-async function runRun({ once = false, dryRun = false }): Promise<void> {
-  // Tokens still come from ./.env for now; variables already in the environment win.
+async function runDaemonCommand({ once = false, dryRun = false }): Promise<void> {
+  // Tokens (and CONFIG_PATH) still come from ./.env for now; variables already set win.
   if (existsSync(".env")) process.loadEnvFile(".env");
   try {
     // A dry run only lists issues, so polling again would just list them again.
     await runDaemon({
-      configPath: configPath(new EnvFile(resolve(".env"), resolve(".env.example"))),
+      configPath: configPath(),
       once: once || dryRun,
       dryRun,
     });
@@ -153,6 +153,6 @@ program
   .description("run the Daemon in the foreground: poll Linear and launch T3 threads")
   .option("--once", "do one poll, then exit")
   .option("--dry-run", "list the issues it would launch without starting threads, then exit")
-  .action(runRun);
+  .action(runDaemonCommand);
 
 await program.parseAsync();

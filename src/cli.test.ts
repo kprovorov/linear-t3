@@ -5,7 +5,7 @@ import { setTimeout } from "node:timers/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { fakeLinear, fakeT3 } from "./fake-servers.ts";
+import { type FakeT3Options, fakeLinear, fakeT3 } from "./fake-servers.ts";
 
 const cliPath = fileURLToPath(new URL("./cli.ts", import.meta.url));
 const { version } = JSON.parse(
@@ -125,7 +125,7 @@ describe("cli run", () => {
     { missing: "T3_TOKEN", env: { LINEAR_API_KEY: "lin-key" }, args: [] },
     { missing: "LINEAR_API_KEY", env: {}, args: ["--dry-run"] },
   ])("$args without $missing exits non-zero naming it", ({ missing, env, args }) => {
-    const result = runCliIn({ cwd: workDir(), env }, "run", "--once", ...args);
+    const result = runCliIn({ cwd: workDir(), env }, "run", ...args);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`Missing required environment variable ${missing}`);
   });
@@ -161,7 +161,7 @@ describe("cli run against fake Linear and T3", () => {
   ];
   const project = { id: "project-1", title: "my-app", workspaceRoot: "/work/my-app" };
 
-  async function servers(t3Options: Partial<Parameters<typeof fakeT3>[0]> = {}) {
+  async function servers(t3Options: Partial<FakeT3Options> = {}) {
     const linear = await fakeLinear(issues);
     const t3 = await fakeT3({ projects: [project], ...t3Options });
     cleanup.push(linear.close, t3.close);
