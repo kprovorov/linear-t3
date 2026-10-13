@@ -1,10 +1,10 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { Paths } from "./paths.ts";
-import { type ServiceManager, ServiceError, type Unit } from "./service.ts";
+import { type ServiceManager, ServiceError, type Unit, elapsed, runAttached } from "./service.ts";
 
 const LABEL = "linear-t3";
 // Seconds launchd waits before restarting a crashed Daemon, and after SIGTERM before SIGKILL.
@@ -82,28 +82,7 @@ function tail(log: string, follow: boolean): Promise<number> {
     if (!follow) return Promise.resolve(0);
   }
   // -F rather than -f, so tail waits for a log that doesn't exist yet.
-  const child = spawn("tail", ["-n", "100", ...(follow ? ["-F"] : []), log], {
-    stdio: ["ignore", "inherit", "inherit"],
-  });
-  // Following ends with Ctrl-C, so stop tail with us and treat that as a clean exit.
-  const stop = () => child.kill("SIGTERM");
-  process.on("SIGINT", stop).on("SIGTERM", stop);
-  return new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("exit", (code) => resolve(code ?? 0));
-  });
-}
-
-/** How long process `pid` has been running, as `ps` prints it, or `undefined` if `ps` can't say. */
-async function elapsed(pid: number): Promise<string | undefined> {
-  try {
-    const { stdout } = await promisify(execFile)("ps", ["-o", "etime=", "-p", String(pid)], {
-      encoding: "utf8",
-    });
-    return stdout.trim() || undefined;
-  } catch {
-    return undefined;
-  }
+  return runAttached("tail", ["-n", "100", ...(follow ? ["-F"] : []), log]);
 }
 
 /** The Daemon as a launchd agent in `~/Library/LaunchAgents`. */
@@ -127,7 +106,9 @@ export function launchd(paths: Paths): ServiceManager {
   };
 
   return {
+    kind: "launchd agent",
     unitPath: paths.launchAgent,
+    logLocation: paths.log,
     installed: () => existsSync(paths.launchAgent),
     pinnedNode() {
       if (!existsSync(paths.launchAgent)) return undefined;

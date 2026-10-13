@@ -13,6 +13,7 @@ permissions:
   contents: read
 
 jobs:
+  # Each OS runs its own background service tests: launchd on macOS, systemd on Ubuntu.
   ci:
     strategy:
       fail-fast: false

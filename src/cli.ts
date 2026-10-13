@@ -183,7 +183,7 @@ async function start(): Promise<void> {
     );
   }
   await manager.install(daemonUnit(where, cliPath));
-  console.log(`Started the Daemon (launchd agent ${manager.unitPath})`);
+  console.log(`Started the Daemon (${manager.kind} ${manager.unitPath})`);
 }
 
 /** The service manager, once `start` has installed the Daemon. */
@@ -217,8 +217,10 @@ async function status(): Promise<void> {
   const where = paths();
   const manager = serviceManager(where);
   let daemon = "not installed, run `linear-t3 start`";
+  let hint: string | undefined;
   if (manager.installed()) {
-    const { running, pid, uptime } = await manager.status();
+    const { running, pid, uptime, ...service } = await manager.status();
+    hint = service.hint;
     daemon = running ? `running (pid ${pid}${uptime ? `, up ${uptime}` : ""})` : "stopped";
     const node = manager.pinnedNode();
     if (node && !existsSync(node)) {
@@ -238,8 +240,9 @@ async function status(): Promise<void> {
       `Config:      ${where.config}`,
       `Credentials: ${where.credentials}`,
       `State:       ${state}`,
-      `Log:         ${where.log}`,
+      `Log:         ${manager.logLocation}`,
       `Unit:        ${manager.unitPath}`,
+      ...(hint ? ["", hint] : []),
     ].join("\n"),
   );
 }
