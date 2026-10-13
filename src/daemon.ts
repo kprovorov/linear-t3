@@ -2,13 +2,8 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import {
-  DEFAULT_PROMPT,
-  loadConfig,
-  requireEnv,
-  type Config,
-  type ProjectSettings,
-} from "./config.ts";
+import { DEFAULT_PROMPT, loadConfig, type Config, type ProjectSettings } from "./config.ts";
+import { EnvFile } from "./env-file.ts";
 import {
   createCommentOnce,
   createLinearClient,
@@ -17,6 +12,7 @@ import {
   type Issue,
   type LinearClient,
 } from "./linear.ts";
+import { type Paths, resolveStateFile } from "./paths.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import { T3Client, T3ThreadNotCreated, type T3Project, type WorkspaceStrategy } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
@@ -293,8 +289,19 @@ async function launchCandidates(
   }
 }
 
+/** A token from the environment, else from the Credentials file. */
+function requireToken(key: string, credentials: EnvFile, integration: string): string {
+  const value = process.env[key] || credentials.get(key);
+  if (!value) {
+    throw new Error(
+      `Missing ${key}: run \`linear-t3 connect ${integration}\` or set it in the environment`,
+    );
+  }
+  return value;
+}
+
 export interface DaemonOptions {
-  configPath: string;
+  paths: Paths;
   // Do one poll, then exit.
   once: boolean;
   // List the issues that would be launched without starting threads.
@@ -302,7 +309,7 @@ export interface DaemonOptions {
 }
 
 /** Runs the Daemon's poll loop until SIGINT/SIGTERM, or for a single poll with `once`. */
-export async function runDaemon({ configPath, once, dryRun }: DaemonOptions): Promise<void> {
+export async function runDaemon({ paths, once, dryRun }: DaemonOptions): Promise<void> {
   const stop = (signal: string) => {
     log(`received ${signal}, shutting down`);
     shutdown.abort();
@@ -310,10 +317,12 @@ export async function runDaemon({ configPath, once, dryRun }: DaemonOptions): Pr
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
 
-  const config = await loadConfig(configPath);
-  const linear = createLinearClient(requireEnv("LINEAR_API_KEY"), shutdown.signal);
-  const t3Token = dryRun ? "" : requireEnv("T3_TOKEN");
-  const state = new StateStore(config.stateFile);
+  const config = await loadConfig(paths.config);
+  const credentials = new EnvFile(paths.credentials);
+  const linearKey = requireToken("LINEAR_API_KEY", credentials, "linear");
+  const linear = createLinearClient(linearKey, shutdown.signal);
+  const t3Token = dryRun ? "" : requireToken("T3_TOKEN", credentials, "t3");
+  const state = new StateStore(resolveStateFile(paths, config.stateFile));
   await state.load();
 
   const watching = Object.entries(config.projects).map(([ref, p]) => `${p.linear.team} -> ${ref}`);

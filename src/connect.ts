@@ -3,7 +3,7 @@ import type { EnvFile } from "./env-file.ts";
 export type Failure = { status: "unauthorized" | "unreachable"; message?: string };
 export type CheckResult = { status: "valid"; identity?: string } | Failure;
 
-/** Which token a check was for: the one already in `.env`, or one just obtained. */
+/** Which token a check was for: the one already saved, or one just obtained. */
 export type Step = "existing" | "new";
 
 /** On a failed check: get another new token, or stop connecting this integration with an error. */
@@ -13,7 +13,7 @@ export type FailureAction = "obtain" | "abort";
 export interface Integration {
   /** Display name, e.g. "T3". */
   name: string;
-  /** The `.env` key the token is saved under. */
+  /** The Credentials key the token is saved under. */
   envKey: string;
   /** Gets a new token, e.g. by prompting for it or issuing one. */
   obtain(ui: Ui): Promise<string>;
@@ -59,12 +59,12 @@ function describeFailure(name: string, result: Failure): string {
 }
 
 /**
- * Runs the shared connect flow for one integration: check the token already in `.env` and offer to
+ * Runs the shared connect flow for one integration: check the token already saved and offer to
  * keep it, otherwise get a new one and save it only once its check passes.
  */
 export async function connectIntegration(
   integration: Integration,
-  env: EnvFile,
+  credentials: EnvFile,
   ui: Ui,
 ): Promise<Outcome> {
   const handleFailure = (step: Step, result: Failure) => {
@@ -85,7 +85,7 @@ export async function connectIntegration(
     return result;
   };
 
-  const existing = env.get(integration.envKey);
+  const existing = credentials.get(integration.envKey);
   if (existing !== undefined) {
     const result = await check("existing", existing);
     if (result.status !== "valid") {
@@ -99,7 +99,7 @@ export async function connectIntegration(
     const token = await integration.obtain(ui);
     const result = await check("new", token);
     if (result.status === "valid") {
-      env.set({ [integration.envKey]: token });
+      credentials.set({ [integration.envKey]: token });
       return { integration: integration.name, action: "saved", identity: result.identity };
     }
     handleFailure("new", result);
@@ -114,7 +114,7 @@ export interface PendingIntegration {
 /** Connects each integration in order and stops at the first one that fails. */
 export async function connect(
   integrations: (Integration | PendingIntegration)[],
-  env: EnvFile,
+  credentials: EnvFile,
   ui: Ui,
 ): Promise<Outcome[]> {
   const outcomes: Outcome[] = [];
@@ -122,7 +122,7 @@ export async function connect(
     if (!("check" in integration)) {
       throw new ConnectError(`Connecting ${integration.name} is not implemented yet`);
     }
-    outcomes.push(await connectIntegration(integration, env, ui));
+    outcomes.push(await connectIntegration(integration, credentials, ui));
   }
   return outcomes;
 }

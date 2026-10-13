@@ -82,7 +82,8 @@ const Config = z
     pollIntervalSeconds: z.number().int().min(10).default(60),
     // Caps how many threads are started per poll so a broad filter can't flood T3.
     maxLaunchesPerPoll: z.number().int().min(1).default(5),
-    stateFile: z.string().default("./state.json"),
+    // Relative to the Config file's directory. Unset means the XDG State location.
+    stateFile: z.string().optional(),
     t3: z
       .object({
         url: z.string().url().default(DEFAULT_T3_URL),
@@ -137,10 +138,4 @@ export async function loadConfig(path: string): Promise<Config> {
     throw new Error(`Invalid config ${path}:\n${z.prettifyError(result.error)}`);
   }
   return result.data;
-}
-
-export function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required environment variable ${name}`);
-  return value;
 }

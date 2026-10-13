@@ -142,7 +142,7 @@ describe("t3Integration", () => {
   /** A T3 server that answers each token per `results` (anything else is unauthorized); an Error is thrown. */
   function setup(results: Record<string, CheckResult | Error>, savedToken?: string) {
     const dir = mkdtempSync(join(tmpdir(), "connect-t3-"));
-    const env = new EnvFile(join(dir, ".env"), join(dir, ".env.example"));
+    const env = new EnvFile(join(dir, "credentials"));
     if (savedToken) writeFileSync(env.path, `T3_TOKEN=${savedToken}\n`);
     let issued = 0;
     const integration = t3Integration({
