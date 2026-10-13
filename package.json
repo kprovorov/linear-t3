@@ -24,7 +24,7 @@
   "type": "module",
   "scripts": {
     "build": "vp pack",
-    "prepack": "vp pack",
+    "prepack": "pnpm build",
     "start": "node src/cli.ts run",
     "once": "node src/cli.ts run --once",
     "dry-run": "node src/cli.ts run --dry-run",

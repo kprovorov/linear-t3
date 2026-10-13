@@ -29,6 +29,7 @@ jobs:
 
   # Packs the tarball, installs it into a throwaway global prefix and runs the installed CLI, so a
   # broken `bin`, a missing file or a leftover `.ts` import fails here instead of after publishing.
+  # It uses npm rather than pnpm on purpose: that's how users install it.
   pack-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -40,6 +41,7 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm build
       - name: Pack
         run: npm pack --pack-destination "$RUNNER_TEMP"
       - name: Install the tarball globally
@@ -48,6 +50,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           export PATH="$RUNNER_TEMP/prefix/bin:$PATH"
-          linear-t3 --version
+          expected=$(node -p 'require(process.env.GITHUB_WORKSPACE + "/package.json").version')
+          test "$(linear-t3 --version)" = "$expected"
           linear-t3 --help
-          npx --yes "$RUNNER_TEMP"/linear-t3-*.tgz --version
+          test "$(npx --yes ./linear-t3-*.tgz --version)" = "$expected"
