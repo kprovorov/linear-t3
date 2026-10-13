@@ -1,0 +1,85 @@
+# Publishes the version on main to npm, then tags it and creates a GitHub release.
+#
+# npm trusts this workflow by its filename (trusted publishing, see WF-11), so don't rename it.
+# There is no npm token: `npm publish` swaps the job's OIDC token for a short-lived publish token.
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # the tag and the GitHub release
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - name: Refuse to run outside main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Release only runs on main, not $GITHUB_REF."
+          exit 1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Read the version
+        id: version
+        run: |
+          echo "name=$(node -p 'require("./package.json").name')" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+      - name: Fail if the version is already released
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # npm exits 0 when the version exists and fails with E404 when it doesn't. Any other
+          # failure means we couldn't tell, so stop rather than guess.
+          if npm view "$NAME@$VERSION" version > "$RUNNER_TEMP/npm-view.log" 2>&1; then
+            echo "::error::$NAME@$VERSION is already on npm. Bump the version first."
+            exit 1
+          elif ! grep -q E404 "$RUNNER_TEMP/npm-view.log"; then
+            cat "$RUNNER_TEMP/npm-view.log"
+            echo "::error::Couldn't check npm for $NAME@$VERSION."
+            exit 1
+          fi
+          # A leftover tag or release would make the last step fail after publishing.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+            echo "::error::Tag v$VERSION already exists."
+            exit 1
+          fi
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "::error::GitHub release v$VERSION already exists."
+            exit 1
+          fi
+      - name: Check npm supports trusted publishing
+        run: |
+          # Trusted publishing needs npm 11.5.1 or later.
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
+            if (!ok) { console.error(`::error::npm ${process.argv[1]} is too old for trusted publishing, need 11.5.1+.`); process.exit(1); }
+          ' "$(npm --version)"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm build
+      # --ignore-scripts skips `prepack`, so what gets published is the build that was just tested.
+      - name: Publish to npm
+        run: npm publish --provenance --access public --ignore-scripts
+      - name: Tag and create the GitHub release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
