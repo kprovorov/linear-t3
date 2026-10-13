@@ -338,7 +338,13 @@ describe("cli setup", () => {
   test("the bundled CLI finds the template among the published files", () => {
     const root = fileURLToPath(new URL("..", import.meta.url));
     const pkg = mkdtempSync(join(tmpdir(), "linear-t3-pkg-"));
-    // Lay out the files npm would publish, plus the bundle and the installed dependencies.
+    // Build with the real pack config, then lay out exactly the files npm would publish.
+    const build = spawnSync(
+      process.execPath,
+      [join(root, "node_modules", "vite-plus", "bin", "vp"), "pack"],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(build.status, build.stderr).toBe(0);
     const pack = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
       cwd: root,
       encoding: "utf8",
@@ -349,23 +355,6 @@ describe("cli setup", () => {
       copyFileSync(join(root, path), join(pkg, path));
     }
     symlinkSync(join(root, "node_modules"), join(pkg, "node_modules"));
-    const build = spawnSync(
-      process.execPath,
-      [
-        join(root, "node_modules", "vite-plus", "bin", "vp"),
-        "pack",
-        "src/cli.ts",
-        "--format",
-        "esm",
-        "--platform",
-        "node",
-        "--no-fixed-extension",
-        "--out-dir",
-        join(pkg, "dist"),
-      ],
-      { cwd: root, encoding: "utf8" },
-    );
-    expect(build.status, build.stderr).toBe(0);
 
     const home = homeDir();
     const result = spawnSync(process.execPath, [join(pkg, "dist", "cli.js"), "setup"], {
