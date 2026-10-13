@@ -1,9 +1,14 @@
-import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { promisify } from "node:util";
 import type { Paths } from "./paths.ts";
-import { type ServiceManager, ServiceError, type Unit, elapsed, runAttached } from "./service.ts";
+import {
+  type ServiceManager,
+  ServiceError,
+  type Unit,
+  elapsed,
+  runAttached,
+  runCommand,
+} from "./service.ts";
 
 const NAME = "linear-t3";
 const UNIT = `${NAME}.service`;
@@ -38,30 +43,16 @@ WantedBy=default.target
 `;
 }
 
-async function run(command: string, args: string[]): Promise<{ ok: boolean; output: string }> {
-  try {
-    const { stdout } = await promisify(execFile)(command, args, { encoding: "utf8" });
-    return { ok: true, output: stdout };
-  } catch (error) {
-    const { code, stdout, stderr } = error as NodeJS.ErrnoException & {
-      stdout?: string;
-      stderr?: string;
-    };
-    if (code === "ENOENT") throw new ServiceError(`Could not run \`${command}\``);
-    return { ok: false, output: `${stdout ?? ""}${stderr ?? ""}`.trim() };
-  }
-}
-
 /** Runs `systemctl --user`, throwing with its output if it fails. */
 async function systemctl(...args: string[]): Promise<string> {
-  const { ok, output } = await run("systemctl", ["--user", ...args]);
+  const { ok, output } = await runCommand("systemctl", ["--user", ...args]);
   if (!ok) throw new ServiceError(`\`systemctl --user ${args.join(" ")}\` failed: ${output}`);
   return output;
 }
 
 /** Whether systemd keeps this user's services running after they log out. */
 async function lingering(): Promise<boolean> {
-  const { ok, output } = await run("loginctl", [
+  const { ok, output } = await runCommand("loginctl", [
     "show-user",
     String(process.getuid!()),
     "--property=Linger",

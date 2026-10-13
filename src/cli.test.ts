@@ -709,7 +709,6 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
       env,
       files,
       cli: (...args: string[]) => startCli({ cwd: dir, env }, args).result,
-      launchctl: recorded,
       calls: recorded,
       print: (output: string) => writeFileSync(printed, output),
       resetCalls: () => writeFileSync(calls, ""),
@@ -775,7 +774,7 @@ ${variables}\t</dict>
   startAndInstalledChecks(service);
 
   test("start writes the launchd agent and loads it", async () => {
-    const { env, files, cli, launchctl } = await service();
+    const { env, files, cli, calls } = await service();
     const result = await cli("start");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(readFileSync(files.unit, "utf8")).toBe(
@@ -784,7 +783,7 @@ ${variables}\t</dict>
         XDG_STATE_HOME: env.XDG_STATE_HOME,
       }),
     );
-    expect(launchctl()).toEqual([
+    expect(calls()).toEqual([
       `print ${target}`,
       `enable ${target}`,
       `bootstrap gui/${uid} ${files.unit}`,
@@ -793,7 +792,7 @@ ${variables}\t</dict>
   });
 
   test("start again unloads the old agent, then rewrites and reloads it", async () => {
-    const { files, cli, launchctl, print, resetCalls } = await service();
+    const { files, cli, calls, print, resetCalls } = await service();
     expect((await cli("start")).status).toBe(0);
     writeFileSync(files.unit, "stale");
     print(printed(`state = running\n\tpid = ${process.pid}`));
@@ -801,7 +800,7 @@ ${variables}\t</dict>
     const result = await cli("start");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(readFileSync(files.unit, "utf8")).toContain("<string>run</string>");
-    expect(launchctl()).toEqual([
+    expect(calls()).toEqual([
       `print ${target}`,
       `bootout ${target}`,
       `enable ${target}`,
@@ -839,28 +838,28 @@ ${variables}\t</dict>
   });
 
   test("stop unloads the agent and disables it so it doesn't start at login", async () => {
-    const { cli, launchctl } = await installed();
+    const { cli, calls } = await installed();
     const result = await cli("stop");
     expect(result).toMatchObject({ status: 0, stderr: "" });
-    expect(launchctl()).toEqual([`print ${target}`, `bootout ${target}`, `disable ${target}`]);
+    expect(calls()).toEqual([`print ${target}`, `bootout ${target}`, `disable ${target}`]);
   });
 
   test("stop when already stopped only disables the agent", async () => {
-    const { cli, launchctl } = await installed("unloaded");
+    const { cli, calls } = await installed("unloaded");
     expect((await cli("stop")).status).toBe(0);
-    expect(launchctl()).toEqual([`print ${target}`, `disable ${target}`]);
+    expect(calls()).toEqual([`print ${target}`, `disable ${target}`]);
   });
 
   test("restart kills and restarts a loaded agent", async () => {
-    const { cli, launchctl } = await installed();
+    const { cli, calls } = await installed();
     expect(await cli("restart")).toMatchObject({ status: 0, stderr: "" });
-    expect(launchctl()).toEqual([`print ${target}`, `kickstart -k ${target}`]);
+    expect(calls()).toEqual([`print ${target}`, `kickstart -k ${target}`]);
   });
 
   test("restart after stop enables and loads the agent again", async () => {
-    const { files, cli, launchctl } = await installed("unloaded");
+    const { files, cli, calls } = await installed("unloaded");
     expect(await cli("restart")).toMatchObject({ status: 0, stderr: "" });
-    expect(launchctl()).toEqual([
+    expect(calls()).toEqual([
       `print ${target}`,
       `enable ${target}`,
       `bootstrap gui/${uid} ${files.unit}`,
@@ -868,12 +867,12 @@ ${variables}\t</dict>
   });
 
   test("uninstall unloads and removes the agent but keeps Config, Credentials, State and log", async () => {
-    const { files, cli, launchctl } = await installed();
+    const { files, cli, calls } = await installed();
     writeFile(files.state, "{}");
     writeFile(files.log, "old output\n");
     const result = await cli("uninstall");
     expect(result).toMatchObject({ status: 0, stderr: "" });
-    expect(launchctl()).toEqual([`print ${target}`, `bootout ${target}`]);
+    expect(calls()).toEqual([`print ${target}`, `bootout ${target}`]);
     expect(existsSync(files.unit)).toBe(false);
     for (const kept of [files.config, files.credentials, files.state, files.log]) {
       expect(existsSync(kept)).toBe(true);
@@ -914,14 +913,14 @@ ${variables}\t</dict>
   );
 
   test("status without the service says it isn't installed", async () => {
-    const { files, cli, launchctl } = await service();
+    const { files, cli, calls } = await service();
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(result.stdout.trimEnd().split("\n")).toEqual([
       "Daemon:      not installed, run `linear-t3 start`",
       ...whereLines(files),
     ]);
-    expect(launchctl()).toEqual([]);
+    expect(calls()).toEqual([]);
   });
 
   test("status shows the State path the Config sets", async () => {
@@ -992,7 +991,7 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
    * A fresh home with a valid Config and Credentials, fake T3 and Linear servers that accept only
    * those tokens, and stand-in `systemctl`, `journalctl` and `loginctl` on `PATH` that record each
    * call. `systemctl show` prints `shown` once it is set, else what systemd shows for a unit that
-   * isn't running. `journalctl` prints `journal` and, with `-f`, waits to be stopped. `loginctl`
+   * isn't running. `journalctl` prints `journal line` and, with `-f`, waits to be stopped. `loginctl`
    * says whether lingering is on.
    */
   async function service() {
@@ -1031,8 +1030,10 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
     );
     stub(
       "journalctl",
+      // Set the trap before printing anything, so a stop that comes right after is never missed.
+      "trap 'exit 0' TERM",
       'echo "journal line"',
-      'for arg in "$@"; do if [ "$arg" = -f ]; then exec sleep 30; fi; done',
+      'for arg in "$@"; do if [ "$arg" = -f ]; then while :; do sleep 0.1; done; fi; done',
     );
     stub("loginctl", `if [ -f "${linger}" ]; then echo yes; else echo no; fi`);
     const env = { ...home, LINEAR_API_URL: linear.url, PATH: `${bin}:${process.env.PATH}` };
@@ -1137,6 +1138,22 @@ WantedBy=default.target
     );
     expect(unit).not.toContain("lin-key");
     expect(unit).not.toContain("t3-tok");
+  });
+
+  test("without XDG variables the unit goes in ~/.config and gets no environment", async () => {
+    const { env, files } = await service();
+    const home = { HOME: env.HOME, LINEAR_API_URL: env.LINEAR_API_URL, PATH: env.PATH };
+    const config = join(env.HOME, ".config", "linear-t3", "config.json");
+    writeFile(config, readFileSync(files.config, "utf8"));
+    writeFile(
+      join(env.HOME, ".config", "linear-t3", "credentials"),
+      readFileSync(files.credentials, "utf8"),
+    );
+    const { status } = await startCli({ cwd: tmpdir(), env: home }, ["start"]).result;
+    expect(status).toBe(0);
+    expect(
+      readFileSync(join(env.HOME, ".config", "systemd", "user", "linear-t3.service"), "utf8"),
+    ).toBe(expectedUnit({ config }, {}));
   });
 
   test("the unit escapes paths so systemd reads them back as written", async () => {

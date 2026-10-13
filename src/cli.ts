@@ -219,7 +219,8 @@ async function status(): Promise<void> {
   let daemon = "not installed, run `linear-t3 start`";
   let hint: string | undefined;
   if (manager.installed()) {
-    const { running, pid, uptime, ...service } = await manager.status();
+    const service = await manager.status();
+    const { running, pid, uptime } = service;
     hint = service.hint;
     daemon = running ? `running (pid ${pid}${uptime ? `, up ${uptime}` : ""})` : "stopped";
     const node = manager.pinnedNode();
