@@ -19,7 +19,8 @@
     "linear-t3": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "config.template.json"
   ],
   "type": "module",
   "scripts": {
