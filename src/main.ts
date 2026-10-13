@@ -18,7 +18,6 @@ import {
   type Issue,
   type LinearClient,
 } from "./linear.ts";
-import { ScanTracker } from "./scan.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import { T3Client, T3ThreadNotCreated, type T3Project, type WorkspaceStrategy } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
@@ -186,8 +185,6 @@ async function runPendingActions(
   await recordOrStop(state, issueId, { ...record, pendingActions });
 }
 
-let scans: ScanTracker;
-
 // Issues whose launch failed are skipped until `retryAt`, so they can't starve the rest of the queue.
 const launchFailures = new Map<string, { count: number; retryAt: number; attempt: number }>();
 
@@ -219,26 +216,11 @@ async function poll(
     }
   }
 
-  // Per project: when this scan started and which matching issues it saw. Committed once launches
-  // are done (or the poll fails), so issues left unlaunched are carried into the next scan.
-  const scanned = new Map<string, { startedAt: number; full: boolean; issueIds: string[] }>();
-  try {
-    const candidates = await collectCandidates(config, linear, state, scanned);
-    if (candidates.length === 0) return;
-    log(
-      `${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`,
-    );
-    if (dryRun || shutdown.signal.aborted) return;
-    await launchCandidates(candidates, { config, linear, state, t3Token });
-  } finally {
-    for (const [projectRef, scan] of scanned) {
-      scans.complete(
-        projectRef,
-        scan,
-        scan.issueIds.filter((id) => !state.has(id)),
-      );
-    }
-  }
+  const candidates = await collectCandidates(config, linear, state);
+  if (candidates.length === 0) return;
+  log(`${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`);
+  if (dryRun || shutdown.signal.aborted) return;
+  await launchCandidates(candidates, { config, linear, state, t3Token });
 }
 
 /** Matching issues not launched yet and not backing off, round-robin across projects. */
@@ -246,19 +228,17 @@ async function collectCandidates(
   config: Config,
   linear: LinearClient,
   state: StateStore,
-  scanned: Map<string, { startedAt: number; full: boolean; issueIds: string[] }>,
 ): Promise<Candidate[]> {
   const now = Date.now();
   const pending = new Map<string, Candidate>();
   for (const [projectRef, settings] of Object.entries(config.projects)) {
     if (shutdown.signal.aborted) return [];
-    const startedAt = Date.now();
-    const { filter, full } = scans.plan(projectRef, [
-      { team: { key: { eq: settings.linear.team } } },
-      settings.linear.filter ?? {},
-    ]);
+    // Every poll reads all matching issues: one can start matching without being updated itself,
+    // e.g. when its blocker is done.
+    const filter = {
+      and: [{ team: { key: { eq: settings.linear.team } } }, settings.linear.filter ?? {}],
+    };
     const issues = await listIssues(linear, filter, shutdown.signal);
-    scanned.set(projectRef, { startedAt, full, issueIds: issues.map((i) => i.id) });
     for (const issue of issues) {
       if (state.has(issue.id) || (launchFailures.get(issue.id)?.retryAt ?? 0) > now) continue;
       // An issue matched by several projects gets a single thread, in the first matching project.
@@ -335,7 +315,6 @@ async function main() {
   const t3Token = args["dry-run"] ? "" : requireEnv("T3_TOKEN");
   const state = new StateStore(config.stateFile);
   await state.load();
-  scans = new ScanTracker(config.fullScanIntervalMinutes * 60_000);
 
   const watching = Object.entries(config.projects).map(([ref, p]) => `${p.linear.team} -> ${ref}`);
   log(`watching ${watching.join(", ")}`);
