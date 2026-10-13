@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as clack from "@clack/prompts";
 import { Argument, Command } from "commander";
@@ -12,6 +12,7 @@ import {
   connect,
 } from "./connect.ts";
 import { t3BaseUrl, t3Integration } from "./connect-t3.ts";
+import { runDaemon } from "./daemon.ts";
 import { EnvFile } from "./env-file.ts";
 import { checkLinear } from "./token-check.ts";
 
@@ -33,9 +34,14 @@ const linear: Integration = {
     step === "existing" && result.status === "unreachable" ? "abort" : "obtain",
 };
 
-/** The config file the daemon would use: `CONFIG_PATH` from the environment or `.env`. */
-const configPath = (env: EnvFile) =>
-  resolve(process.env.CONFIG_PATH ?? env.get("CONFIG_PATH") ?? "config.json");
+/** The Config file: `--config`, else `CONFIG_PATH` from the environment or `.env`. */
+const configPath = (env?: EnvFile) =>
+  resolve(
+    program.opts<{ config?: string }>().config ??
+      process.env.CONFIG_PATH ??
+      env?.get("CONFIG_PATH") ??
+      "config.json",
+  );
 
 /** Every integration `connect` knows about, in the order plain `connect` runs them. */
 const integrations = {
@@ -109,7 +115,28 @@ async function runConnect(integration: IntegrationName | undefined): Promise<voi
   }
 }
 
-const program = new Command("linear-t3").version(pkg.version).action(() => program.help());
+async function runDaemonCommand({ once = false, dryRun = false }): Promise<void> {
+  // Tokens (and CONFIG_PATH) still come from ./.env for now; variables already set win.
+  if (existsSync(".env")) process.loadEnvFile(".env");
+  try {
+    // A dry run only lists issues, so polling again would just list them again.
+    await runDaemon({
+      configPath: configPath(),
+      once: once || dryRun,
+      dryRun,
+    });
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+const program = new Command("linear-t3")
+  .version(pkg.version)
+  .option("--config <path>", "the Config file (default: $CONFIG_PATH or ./config.json)")
+  // Subcommand help lists --config too; set before adding commands so they inherit it.
+  .configureHelp({ showGlobalOptions: true })
+  .action(() => program.help());
 
 program
   .command("connect")
@@ -120,5 +147,12 @@ program
     ),
   )
   .action(runConnect);
+
+program
+  .command("run")
+  .description("run the Daemon in the foreground: poll Linear and launch T3 threads")
+  .option("--once", "do one poll, then exit")
+  .option("--dry-run", "list the issues it would launch without starting threads, then exit")
+  .action(runDaemonCommand);
 
 await program.parseAsync();

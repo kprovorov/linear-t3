@@ -3,15 +3,15 @@
 export const apps = [
   {
     name: "linear-t3",
-    script: "src/main.ts",
+    script: "src/cli.ts",
+    args: "run",
     cwd: import.meta.dirname,
-    // Node loads .env itself and strips TypeScript types natively; no build step.
+    // `run` loads .env itself and Node strips TypeScript types natively; no build step.
     // pm2 runs .ts scripts with Bun when it's installed, so pin Node.
     interpreter: "node",
-    node_args: "--env-file=.env",
     autorestart: true,
     restart_delay: 10_000,
-    // main.ts finishes the current launch and exits cleanly on SIGINT.
+    // `run` finishes the current launch and exits cleanly on SIGINT.
     kill_timeout: 30_000,
   },
 ];
