@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
-import { sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as clack from "@clack/prompts";
 import { Argument, Command } from "commander";
@@ -112,6 +112,32 @@ async function runConnect(integration: IntegrationName | undefined): Promise<voi
     }
     process.exit(1);
   }
+}
+
+// Resolved from this module, so it's found both from `src/` and from the bundle in `dist/`.
+const configTemplate = new URL("../config.template.json", import.meta.url);
+
+function runSetup(): void {
+  const { config } = paths();
+  mkdirSync(dirname(config), { recursive: true });
+  try {
+    // `wx` fails if the file exists, so an existing Config is never touched.
+    writeFileSync(config, readFileSync(configTemplate), { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    console.error(`A Config already exists at ${config}, leaving it unchanged`);
+    process.exit(1);
+  }
+  console.log(
+    [
+      `Wrote a starter Config to ${config}`,
+      "",
+      "Next steps:",
+      "  1. Edit its projects: your T3 projects, their Linear teams and filters",
+      "  2. Run `linear-t3 connect` to save the T3 and Linear tokens",
+      "  3. Run `linear-t3 start` to run the Daemon in the background",
+    ].join("\n"),
+  );
 }
 
 async function runDaemonCommand({ once = false, dryRun = false }): Promise<void> {
@@ -231,6 +257,11 @@ const program = new Command("linear-t3")
   // Subcommand help lists --config too; set before adding commands so they inherit it.
   .configureHelp({ showGlobalOptions: true })
   .action(() => program.help());
+
+program
+  .command("setup")
+  .description("write a starter Config to edit (refuses if the Config already exists)")
+  .action(runSetup);
 
 program
   .command("connect")

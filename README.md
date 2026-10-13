@@ -14,8 +14,7 @@ It is written in TypeScript, uses the official [`@linear/sdk`](https://github.co
 
 ```sh
 pnpm install
-mkdir -p ~/.config/linear-t3
-cp config.example.json ~/.config/linear-t3/config.json   # edit projects, teams and filters
+pnpm cli setup            # writes a starter Config to ~/.config/linear-t3/config.json; edit its projects, teams and filters
 pnpm cli connect t3       # issues a T3 token, checks it and saves it to the Credentials file
 pnpm cli connect linear   # asks for a Linear API key, checks it and saves it to the Credentials file
 ```
@@ -54,7 +53,7 @@ pnpm test           # run the tests
 
 ## Configuration
 
-See `config.example.json`. The main keys:
+`setup` writes a starter Config from `config.template.json` to the Config path (honoring `--config` and `$LINEAR_T3_CONFIG`), creating its directory. It never overwrites an existing Config. The main keys:
 
 | Key                   | Description                                                                                |
 | --------------------- | ------------------------------------------------------------------------------------------ |

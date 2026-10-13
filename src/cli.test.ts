@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -296,6 +297,89 @@ describe("cli run", () => {
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(dirs[used]);
+  });
+});
+
+describe("cli setup", () => {
+  const cleanup: (() => void)[] = [];
+  afterEach(() => cleanup.splice(0).forEach((close) => close()));
+
+  test("writes a starter Config the Daemon accepts, then prints its path and the next steps", async () => {
+    const home = homeDir();
+    const { config } = locations(home);
+    const result = runCliIn({ env: home }, "setup");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).toContain(config);
+    expect(result.stdout).toMatch(/edit .*projects/i);
+    expect(result.stdout).toMatch(/linear-t3 connect[^]*linear-t3 start/);
+
+    // A dry run only talks to Linear, so it passes exactly when the Config loads.
+    const linear = await fakeLinear([]);
+    cleanup.push(linear.close);
+    const env = { ...home, LINEAR_API_URL: linear.url, LINEAR_API_KEY: "lin-key", T3_TOKEN: "t" };
+    const dryRun = await startCli({ cwd: home.HOME, env }, ["run", "--dry-run"]).result;
+    expect(dryRun).toMatchObject({ status: 0, stderr: "" });
+  });
+
+  test("refuses to overwrite an existing Config and exits non-zero", () => {
+    const home = homeDir();
+    const { config } = locations(home);
+    writeFile(config, '{"mine":true}\n');
+    const result = runCliIn({ env: home }, "setup");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`already exists at ${config}`);
+    expect(readFileSync(config, "utf8")).toBe('{"mine":true}\n');
+  });
+
+  test.each<{
+    case: string;
+    args: (path: string) => string[];
+    env: (path: string) => Record<string, string>;
+  }>([
+    { case: "--config", args: (path) => ["--config", path], env: () => ({}) },
+    { case: "LINEAR_T3_CONFIG", args: () => [], env: (path) => ({ LINEAR_T3_CONFIG: path }) },
+  ])("$case sets where it writes, creating missing directories", ({ args, env }) => {
+    const home = homeDir();
+    const path = join(home.HOME, "elsewhere", "nested", "mine.json");
+    const result = runCliIn({ env: { ...home, ...env(path) } }, "setup", ...args(path));
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).toContain(path);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toHaveProperty("projects");
+    expect(existsSync(locations(home).config)).toBe(false);
+  });
+
+  test("the bundled CLI finds the template among the published files", () => {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const pkg = mkdtempSync(join(tmpdir(), "linear-t3-pkg-"));
+    // Build with the real pack config, then lay out exactly the files npm would publish.
+    const build = spawnSync(
+      process.execPath,
+      [join(root, "node_modules", "vite-plus", "bin", "vp"), "pack"],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(build.status, build.stderr).toBe(0);
+    const pack = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    expect(pack.status).toBe(0);
+    for (const { path } of (JSON.parse(pack.stdout) as [{ files: { path: string }[] }])[0].files) {
+      mkdirSync(dirname(join(pkg, path)), { recursive: true });
+      copyFileSync(join(root, path), join(pkg, path));
+    }
+    symlinkSync(join(root, "node_modules"), join(pkg, "node_modules"));
+
+    const home = homeDir();
+    const result = spawnSync(process.execPath, [join(pkg, "dist", "cli.js"), "setup"], {
+      encoding: "utf8",
+      input: "",
+      timeout: 10_000,
+      env: cliEnv(home),
+    });
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(readFileSync(locations(home).config, "utf8")).toBe(
+      readFileSync(join(root, "config.template.json"), "utf8"),
+    );
   });
 });
 
