@@ -298,10 +298,7 @@ describe("cli setup", () => {
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(result.stdout).toContain(config);
     expect(result.stdout).toMatch(/edit .*projects/i);
-    expect(result.stdout.indexOf("linear-t3 connect")).toBeGreaterThan(-1);
-    expect(result.stdout.indexOf("linear-t3 start")).toBeGreaterThan(
-      result.stdout.indexOf("linear-t3 connect"),
-    );
+    expect(result.stdout).toMatch(/linear-t3 connect[^]*linear-t3 start/);
 
     // A dry run only talks to Linear, so it passes exactly when the Config loads.
     const linear = await fakeLinear([]);
@@ -321,7 +318,11 @@ describe("cli setup", () => {
     expect(readFileSync(config, "utf8")).toBe('{"mine":true}\n');
   });
 
-  test.each<{ case: string; args: (path: string) => string[]; env: (path: string) => object }>([
+  test.each<{
+    case: string;
+    args: (path: string) => string[];
+    env: (path: string) => Record<string, string>;
+  }>([
     { case: "--config", args: (path) => ["--config", path], env: () => ({}) },
     { case: "LINEAR_T3_CONFIG", args: () => [], env: (path) => ({ LINEAR_T3_CONFIG: path }) },
   ])("$case sets where it writes, creating missing directories", ({ args, env }) => {
