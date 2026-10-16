@@ -8,7 +8,7 @@ A small Daemon that polls Linear for issues that match your filters and starts a
 - After a thread starts, the Daemon can comment on the issue with the thread link and move the issue to another workflow state.
 - Launched issues are recorded in the State file, so restarting the Daemon never starts the same issue twice.
 
-It runs on macOS and Linux with Node 22.18+, 24.11+ or 26+.
+It runs on macOS and Linux with Node 22.18+, 24.11+ or 26+, and needs T3 Code 0.1.0 or later.
 
 ## Quick start
 
@@ -115,7 +115,7 @@ Project settings. Each value comes from the project if it sets one, otherwise fr
 
 ## How it talks to T3 Code
 
-T3 Code has no public API for creating threads, so the Daemon uses the same WebSocket RPC as the T3 web client. It was built against T3 Code `0.0.46-nightly.20261006` and updated for orchestration protocol 2 in `0.0.46-nightly.20261008`, whose server registers `orchestration.launchThread`, the same RPC behind T3's own `t3_thread_launch` tool. Other T3 versions may not expose these RPCs.
+T3 Code has no public API for creating threads, so the Daemon uses the same WebSocket RPC as the T3 web client. It needs T3 Code 0.1.0 or later. That is the first stable release to speak orchestration protocol 2 and register `orchestration.launchThread`, the same RPC behind T3's own `t3_thread_launch` tool. Older stable releases don't expose these RPCs.
 
 1. It sends `POST /api/auth/websocket-ticket` with the bearer token and gets back a one-time ticket.
 2. It opens `ws://…/ws?wsTicket=…&orchestrationProtocol=2`, which speaks Effect RPC with JSON messages. Servers that require protocol 2 reject sockets that don't declare it with `426 orchestration_protocol_incompatible`.
