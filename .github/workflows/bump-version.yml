@@ -33,6 +33,9 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version-file: .node-version
+          # Nothing is installed here, so pnpm isn't set up. Without this,
+          # setup-node sees packageManager in package.json and looks for pnpm.
+          package-manager-cache: false
       # Commit subjects are squash-merged PR titles, which pr-title.yml keeps as
       # Conventional Commits. A `!` after the type or scope is major, a feat is
       # minor, anything else (including older non-conventional commits) is patch.
