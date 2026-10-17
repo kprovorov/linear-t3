@@ -20,6 +20,10 @@ _Avoid_: settings file, ecosystem
 The saved tokens for each Integration. They're kept apart from the Config so the Config can be shared.
 _Avoid_: env, secrets file
 
+**Running thread**:
+Any T3 thread that is doing work right now: its agent is mid-turn, still finishing up, or still has background tasks running. It counts whether the Daemon or the user started it. A thread waiting for the user's approval or input doesn't count. Running threads are what the thread caps limit.
+_Avoid_: active thread, busy thread, open thread
+
 **State**:
 The Daemon's record of which Linear issues already have a thread, so a restart never launches the same issue twice.
 _Avoid_: cache, database
