@@ -115,7 +115,7 @@ Project settings. Each value comes from the project if it sets one, otherwise fr
 
 ## Launch order
 
-When more issues match than the Daemon can start, it picks them in this order. Within each project, issues go by Linear priority, Urgent first and Low last, with "No priority" after Low. Issues with the same priority go oldest first. Across projects, it takes one issue from each project in turn, so a busy project can't take every slot.
+When more issues match than the Daemon can start, it picks them in this order. Within each project, issues go by Linear priority, Urgent first and Low last, with "No priority" after Low. Issues with the same priority go oldest first. Across projects, each poll takes one issue from each project in turn, starting with the first project in the Config. So a busy project can't use up a poll's `maxLaunchesPerPoll` on its own, but when that cap is smaller than the number of projects, the projects listed first get the slots.
 
 ## How it talks to T3 Code
 
