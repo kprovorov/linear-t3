@@ -220,8 +220,12 @@ async function poll(
   }
 
   const candidates = await collectCandidates(config, linear, state);
-  if (candidates.length === 0) return;
-  log(`${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`);
+  // A dry run still reads T3, to show the Running counts.
+  if (candidates.length === 0 && !dryRun) return;
+  if (candidates.length > 0)
+    log(
+      `${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`,
+    );
   if (shutdown.signal.aborted) return;
   await launchCandidates(candidates, { config, linear, state, t3Token, dryRun });
 }
@@ -286,7 +290,7 @@ async function collectCandidates(
 }
 
 /** A dry run's header: Running threads in T3, and in each project that has a cap. */
-function logRunning(
+function logDryRunHeader(
   config: Config,
   projects: T3Project[],
   running: Map<string, number>,
@@ -338,7 +342,7 @@ async function launchCandidates(
     let runningInT3 = runningThreads.length;
     const cap = config.maxRunningThreads ?? Infinity;
     const threadIds = new Set(threads.map((thread) => thread.id));
-    if (dryRun) logRunning(config, projects, running, runningInT3);
+    if (dryRun) logDryRunHeader(config, projects, running, runningInT3);
     let launched = 0;
     // Keep going past failures and full projects, so neither can block later candidates. The cap
     // check needs the T3 project, so an unknown project ref fails even when nothing has room.
@@ -361,31 +365,31 @@ async function launchCandidates(
       const inT3 = threadIds.has(threadIdFor(launchKey(issue.id, attempt)));
       if (!inT3) {
         // Held back, not failed: no backoff, so it's a candidate again next poll.
-        // `cap` names the full cap for a dry run; `reason` is what a real run logs, if anything.
-        let full: { cap: string; reason?: string } | undefined;
+        // `label` names the full cap for a dry run; `reason` is what a real run logs, if anything.
+        let full: { label: string; reason?: string } | undefined;
         if (runningInT3 >= cap) {
           full = {
-            cap: `global ${runningInT3}/${cap}`,
+            label: `global ${runningInT3}/${cap}`,
             reason: `T3 has ${runningInT3}/${cap} running`,
           };
         } else if (runningInProject >= projectCap) {
           const count = `${runningInProject}/${projectCap}`;
           full = {
-            cap: `project "${projectRef}" ${count}`,
+            label: `project "${projectRef}" ${count}`,
             reason: `project "${projectRef}" has ${count} running`,
           };
         } else if (launched >= config.maxLaunchesPerPoll) {
-          full = { cap: `maxLaunchesPerPoll ${launched}/${config.maxLaunchesPerPoll}` };
+          full = { label: `maxLaunchesPerPoll ${launched}/${config.maxLaunchesPerPoll}` };
         }
         if (full) {
-          if (dryRun) log(`${issue.identifier} would wait (${full.cap})`);
+          if (dryRun) log(`${issue.identifier} would wait (${full.label})`);
           else if (full.reason) log(`${issue.identifier} waiting: ${full.reason}`);
           continue;
         }
       }
       let started = dryRun;
       if (dryRun) {
-        log(`${issue.identifier} would start`);
+        log(`${issue.identifier} ${inT3 ? "would record its existing thread" : "would start"}`);
       } else {
         try {
           await launchIssue(candidate, project, attempt, { config, t3, linear, state });
@@ -443,7 +447,7 @@ export async function runDaemon({ paths, once, dryRun }: DaemonOptions): Promise
   const t3Token = requireToken("T3_TOKEN", credentials, "t3");
   const state = new StateStore(resolveStateFile(paths, config.stateFile));
   // A dry run launches nothing, so it never writes State.
-  await state.load({ readOnly: dryRun });
+  await state.load({ checkWritable: !dryRun });
 
   const watching = Object.entries(config.projects).map(([ref, p]) => `${p.linear.team} -> ${ref}`);
   log(`watching ${watching.join(", ")}`);

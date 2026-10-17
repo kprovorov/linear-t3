@@ -23,15 +23,15 @@ export class StateStore {
     this.path = path;
   }
 
-  /** Reads the State; `readOnly` skips the write that checks it can be saved. */
-  async load({ readOnly = false } = {}): Promise<void> {
+  /** Reads the State; `checkWritable` saves it straight back to prove it can be saved. */
+  async load({ checkWritable = true } = {}): Promise<void> {
     try {
       this.launched = JSON.parse(await readFile(this.path, "utf8")).launched ?? {};
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     // Fail at startup rather than after launching a thread we then can't record.
-    if (!readOnly) await this.save();
+    if (checkWritable) await this.save();
   }
 
   has(issueId: string): boolean {

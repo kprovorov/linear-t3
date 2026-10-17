@@ -320,12 +320,16 @@ describe("cli setup", () => {
     expect(result.stdout).toMatch(/edit .*projects/i);
     expect(result.stdout).toMatch(/linear-t3 connect[^]*linear-t3 start/);
 
-    // With no matching issues a dry run never reaches T3, so it passes exactly when the Config loads.
+    // With no matching issues, a dry run passes exactly when the Config loads and T3 answers.
     const linear = await fakeLinear([]);
-    cleanup.push(linear.close);
+    const t3 = await fakeT3({ projects: [] });
+    cleanup.push(linear.close, t3.close);
+    const starter = JSON.parse(readFileSync(config, "utf8"));
+    writeFileSync(config, JSON.stringify({ ...starter, t3: { url: t3.url } }));
     const env = { ...home, LINEAR_API_URL: linear.url, LINEAR_API_KEY: "lin-key", T3_TOKEN: "t" };
     const dryRun = await startCli({ cwd: home.HOME, env }, ["run", "--dry-run"]).result;
     expect(dryRun).toMatchObject({ status: 0, stderr: "" });
+    expect(dryRun.stdout).toContain("T3 has 0/4 running");
   });
 
   test("refuses to overwrite an existing Config and exits non-zero", () => {
@@ -535,6 +539,27 @@ describe("cli run against fake Linear and T3", () => {
     expect(linear.queries.some((q) => q.includes("issues"))).toBe(true);
     expect(t3.launches).toEqual([]);
     expect(existsSync(files.state)).toBe(false);
+  });
+
+  test("--dry-run leaves State and pending Linear actions alone", async () => {
+    const { linear, t3, dir, env, files } = await servers();
+    const launched = {
+      "issue-1": {
+        identifier: "ENG-1",
+        threadId: "t-1",
+        launchedAt: "2026-01-01T00:00:00.000Z",
+        pendingActions: { comment: true },
+      },
+    };
+    const before = JSON.stringify({ launched });
+    writeFile(files.state, before);
+    const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).toContain("1 new issue(s): ENG-2");
+    expect(result.stdout).toContain("ENG-2 would start");
+    expect(readFileSync(files.state, "utf8")).toBe(before);
+    expect(linear.queries.some((q) => q.includes("commentCreate"))).toBe(false);
+    expect(t3.launches).toEqual([]);
   });
 
   /** Runs `run --once` `polls` times and returns the State's launched issue ids after each one. */
@@ -771,6 +796,15 @@ describe("cli run against fake Linear and T3", () => {
       expect(launchedIds(files.state)).toEqual(["issue-1"]);
       expect(t3.launches.map((l) => l.threadId)).toEqual([threads[0]!.id, threads[0]!.id]);
       expect(result.stdout).toContain("ENG-2 waiting: T3 has 1/1 running");
+    });
+
+    test("--dry-run says a cut-off launch would only be recorded, without taking a slot", async () => {
+      const { t3, dir, env } = await cutOffFirstLaunch({ maxRunningThreads: 1 });
+      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain("ENG-1 would record its existing thread");
+      expect(result.stdout).toContain("ENG-2 would wait (global 1/1)");
+      expect(t3.launches).toHaveLength(1);
     });
 
     test("recording a cut-off launch doesn't use up maxLaunchesPerPoll", async () => {
