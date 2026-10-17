@@ -41,6 +41,11 @@ export function isRunningThread(thread: T3Thread): boolean {
   );
 }
 
+/** The id `launchThread` gives the thread it starts under `idempotencyKey`. */
+export function threadIdFor(idempotencyKey: string): string {
+  return stableUuid(`${idempotencyKey}:thread`);
+}
+
 export interface T3Shell {
   projects: T3Project[];
   threads: T3Thread[];
@@ -273,7 +278,7 @@ export class T3Client {
    * the thread may exist, and a retry must reuse the same key.
    */
   async launchThread(input: LaunchThreadInput): Promise<{ threadId: string; resumed: boolean }> {
-    const threadId = stableUuid(`${input.idempotencyKey}:thread`);
+    const threadId = threadIdFor(input.idempotencyKey);
     try {
       return await this.launch(threadId, input);
     } catch (error) {

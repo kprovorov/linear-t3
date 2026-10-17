@@ -150,7 +150,10 @@ export interface FakeThread {
 
 export interface FakeT3Options {
   projects: { id: string; title: string; workspaceRoot: string }[];
-  /** The snapshot's threads, read at each snapshot so a test can change them between polls. */
+  /**
+   * The snapshot's threads, read at each snapshot so a test can change them between polls. A
+   * launch adds its thread here as running, as T3 does once it creates the thread.
+   */
   threads?: FakeThread[];
   /** When set, the ticket endpoint answers 401 to any other bearer token. */
   token?: string;
@@ -218,6 +221,13 @@ export async function fakeT3({ projects, threads = [], token, onLaunch }: FakeT3
           send({ _tag: "Chunk", requestId: message.id, values: [{ kind: "snapshot", snapshot }] });
         } else if (message.tag === "orchestration.launchThread") {
           launches.push(message.payload);
+          const { threadId, projectId } = message.payload as {
+            threadId: string;
+            projectId: string;
+          };
+          if (!threads.some((t) => t.id === threadId)) {
+            threads.push({ id: threadId, projectId, activityRunStatus: "running" });
+          }
           void (onLaunch?.(message.payload) ?? Promise.resolve()).then(() =>
             exit(message.id, { threadId: message.payload.threadId, resumed: false }),
           );

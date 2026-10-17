@@ -18,6 +18,7 @@ import {
   T3Client,
   T3ThreadNotCreated,
   isRunningThread,
+  threadIdFor,
   type T3Project,
   type WorkspaceStrategy,
 } from "./t3.ts";
@@ -91,6 +92,11 @@ async function recordOrStop(
   }
 }
 
+// Attempt 0 keeps the plain issue id; later attempts get a fresh thread id (see recordLaunchFailure).
+function launchKey(issueId: string, attempt: number): string {
+  return attempt === 0 ? issueId : `${issueId}:${attempt}`;
+}
+
 interface Candidate {
   issue: Issue;
   projectRef: string;
@@ -113,8 +119,7 @@ async function launchIssue(
 
   const { threadId, resumed } = await t3
     .launchThread({
-      // Attempt 0 keeps the plain issue id; later attempts get a fresh thread id (see recordLaunchFailure).
-      idempotencyKey: attempt === 0 ? issue.id : `${issue.id}:${attempt}`,
+      idempotencyKey: launchKey(issue.id, attempt),
       projectId: project.id,
       title: `${issue.identifier}: ${issue.title}`,
       modelSelection,
@@ -290,33 +295,44 @@ async function launchCandidates(
       .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
     const runningInT3 = threads.filter(isRunningThread).length;
     const cap = config.maxRunningThreads ?? Infinity;
+    const threadIds = new Set(threads.map((thread) => thread.id));
     let launched = 0;
+    // Threads this poll added to T3, which count as Running until the next snapshot.
+    let added = 0;
     const waiting: Candidate[] = [];
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
     for (const candidate of candidates) {
       if (shutdown.signal.aborted) break;
+      const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
+      // T3 already has this issue's thread from a launch whose outcome was lost, and counts it.
+      // Launching again only records it, so it needs no room.
+      const inT3 = threadIds.has(threadIdFor(launchKey(candidate.issue.id, attempt)));
       // Held back, not failed: no backoff, so it's a candidate again next poll.
-      if (runningInT3 + launched >= cap) {
+      if (!inT3 && runningInT3 + added >= cap) {
         waiting.push(candidate);
         continue;
       }
       if (launched >= config.maxLaunchesPerPoll) break;
+      let started = false;
       try {
-        const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
         const project = findProject(projects, candidate.projectRef);
         await launchIssue(candidate, project, attempt, { config, t3, linear, state });
         launchFailures.delete(candidate.issue.id);
-        launched++;
+        started = true;
       } catch (error) {
         if (error instanceof StateWriteError) throw error;
-        if (error instanceof LaunchMayHaveStarted) launched++;
+        started = error instanceof LaunchMayHaveStarted;
         recordLaunchFailure(candidate.issue.id, error);
         log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
+      }
+      if (started) {
+        launched++;
+        if (!inT3) added++;
       }
     }
     if (waiting.length > 0) {
       log(
-        `maxRunningThreads ${cap} reached (${runningInT3} running in T3, ${launched} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
+        `maxRunningThreads ${cap} reached (${runningInT3} running in T3, ${added} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
       );
     }
   } finally {
