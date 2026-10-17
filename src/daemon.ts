@@ -200,6 +200,11 @@ function recordLaunchFailure(issueId: string, error: unknown): void {
   launchFailures.set(issueId, { count, retryAt: Date.now() + delayMs, attempt });
 }
 
+function failLaunch(issue: Issue, error: unknown): void {
+  recordLaunchFailure(issue.id, error);
+  log(`${issue.identifier}: failed to start thread: ${(error as Error).message}`);
+}
+
 async function poll(
   config: Config,
   linear: LinearClient,
@@ -293,45 +298,63 @@ async function launchCandidates(
     const { projects, threads } = await t3
       .readShell()
       .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
-    const runningInT3 = threads.filter(isRunningThread).length;
+    // Running threads per T3 project, plus new threads this poll, which count as Running until the
+    // next snapshot.
+    const runningThreads = threads.filter(isRunningThread);
+    const running = new Map<string, number>();
+    for (const { projectId } of runningThreads)
+      running.set(projectId, (running.get(projectId) ?? 0) + 1);
+    let runningInT3 = runningThreads.length;
     const cap = config.maxRunningThreads ?? Infinity;
     const threadIds = new Set(threads.map((thread) => thread.id));
-    // New threads this poll, which count as Running until the next snapshot.
     let launched = 0;
-    const waiting: Candidate[] = [];
-    // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
+    // Keep going past failures and full projects, so neither can block later candidates. The cap
+    // check needs the T3 project, so an unknown project ref fails even when nothing has room.
     for (const candidate of candidates) {
       if (shutdown.signal.aborted) break;
-      const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
+      const { issue, projectRef, settings } = candidate;
+      const attempt = launchFailures.get(issue.id)?.attempt ?? 0;
+      let project: T3Project;
+      try {
+        project = findProject(projects, projectRef);
+      } catch (error) {
+        failLaunch(issue, error);
+        continue;
+      }
+      const runningInProject = running.get(project.id) ?? 0;
+      const projectCap = settings.maxRunningThreads ?? Infinity;
       // T3 already has this issue's thread from a launch whose outcome was lost, and counts it.
-      // Launching again only records it, so it needs no room under either limit.
-      const inT3 = threadIds.has(threadIdFor(launchKey(candidate.issue.id, attempt)));
+      // Launching again only records it, so it needs no room under any limit.
+      const inT3 = threadIds.has(threadIdFor(launchKey(issue.id, attempt)));
       if (!inT3) {
         // Held back, not failed: no backoff, so it's a candidate again next poll.
-        if (runningInT3 + launched >= cap) {
-          waiting.push(candidate);
+        if (runningInT3 >= cap) {
+          log(`${issue.identifier} waiting: T3 has ${runningInT3}/${cap} running`);
+          continue;
+        }
+        if (runningInProject >= projectCap) {
+          log(
+            `${issue.identifier} waiting: project "${projectRef}" has ${runningInProject}/${projectCap} running`,
+          );
           continue;
         }
         if (launched >= config.maxLaunchesPerPoll) continue;
       }
       let started = false;
       try {
-        const project = findProject(projects, candidate.projectRef);
         await launchIssue(candidate, project, attempt, { config, t3, linear, state });
-        launchFailures.delete(candidate.issue.id);
+        launchFailures.delete(issue.id);
         started = true;
       } catch (error) {
         if (error instanceof StateWriteError) throw error;
         started = error instanceof LaunchMayHaveStarted;
-        recordLaunchFailure(candidate.issue.id, error);
-        log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
+        failLaunch(issue, error);
       }
-      if (started && !inT3) launched++;
-    }
-    if (waiting.length > 0) {
-      log(
-        `maxRunningThreads ${cap} reached (${runningInT3} running in T3, ${launched} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
-      );
+      if (started && !inT3) {
+        launched++;
+        runningInT3++;
+        running.set(project.id, runningInProject + 1);
+      }
     }
   } finally {
     t3.close();

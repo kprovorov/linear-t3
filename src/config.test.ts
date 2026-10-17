@@ -36,4 +36,28 @@ describe("loadConfig", () => {
     });
     expect((await loadConfig(path)).maxRunningThreads).toBe(value);
   });
+
+  test("a project's maxRunningThreads wins over defaults, and unset means no cap", async () => {
+    const path = writeConfig({
+      defaults: { maxRunningThreads: 2 },
+      projects: {
+        app: { linear: { team: "ENG" } },
+        infra: { linear: { team: "OPS" }, maxRunningThreads: 0 },
+      },
+    });
+    const { projects } = await loadConfig(path);
+    expect(projects.app?.maxRunningThreads).toBe(2);
+    expect(projects.infra?.maxRunningThreads).toBe(0);
+
+    const unset = writeConfig({ projects: { app: { linear: { team: "ENG" } } } });
+    expect((await loadConfig(unset)).projects.app?.maxRunningThreads).toBeUndefined();
+  });
+
+  test.each([
+    { defaults: { maxRunningThreads: -1 } },
+    { projects: { app: { linear: { team: "ENG" }, maxRunningThreads: 1.5 } } },
+  ])("rejects a per-project maxRunningThreads that isn't an integer ≥ 0: %j", async (config) => {
+    const path = writeConfig({ projects: { app: { linear: { team: "ENG" } } }, ...config });
+    await expect(loadConfig(path)).rejects.toThrow(/maxRunningThreads/);
+  });
 });

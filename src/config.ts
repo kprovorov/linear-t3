@@ -30,7 +30,7 @@ const OnLaunch = z.object({
   comment: z.boolean().optional(),
 });
 
-// How threads are started. Every field can be set in `defaults` and overridden per project.
+// How threads are started, and how many may run. Every field can be set in `defaults` and overridden per project.
 const ThreadSettings = z.object({
   workspace: WorkspaceStrategy.optional(),
   runtimeMode: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]).optional(),
@@ -38,6 +38,9 @@ const ThreadSettings = z.object({
   // Unset everywhere means the T3 project's default model.
   model: ModelSelection.optional(),
   promptTemplate: z.string().optional(),
+  // Caps Running threads in this T3 project, including threads started by hand. Unset means no
+  // cap; 0 pauses the project.
+  maxRunningThreads: z.number().int().min(0).optional(),
 });
 
 // Settings shared by every project. A project's own value wins; nested objects (`workspace`, `model`,
@@ -46,7 +49,7 @@ const Defaults = ThreadSettings.extend({
   linear: z.object({ filter: IssueFilter.optional(), onLaunch: OnLaunch.optional() }).optional(),
 });
 
-// Which Linear issues go to one T3 project, and how their threads are started.
+// Which Linear issues go to one T3 project, how their threads are started, and how many may run.
 const ProjectEntry = ThreadSettings.extend({
   linear: z.object({
     // Linear team key, e.g. "ENG".
@@ -75,6 +78,7 @@ const ProjectSettings = z.object({
   interactionMode: ThreadSettings.shape.interactionMode.unwrap().default("default"),
   model: ModelSelection.optional(),
   promptTemplate: z.string().optional(),
+  maxRunningThreads: ThreadSettings.shape.maxRunningThreads,
 });
 
 const Config = z
