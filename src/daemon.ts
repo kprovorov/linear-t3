@@ -97,6 +97,16 @@ function launchKey(issueId: string, attempt: number): string {
   return attempt === 0 ? issueId : `${issueId}:${attempt}`;
 }
 
+function modelFor(settings: ProjectSettings, project: T3Project, projectRef: string) {
+  const modelSelection = settings.model ?? project.defaultModelSelection;
+  if (!modelSelection) {
+    throw new Error(
+      `No model configured for project "${projectRef}" and the T3 project has no default model`,
+    );
+  }
+  return modelSelection;
+}
+
 interface Candidate {
   issue: Issue;
   projectRef: string;
@@ -110,12 +120,7 @@ async function launchIssue(
   ctx: { config: Config; t3: T3Client; linear: LinearClient; state: StateStore },
 ): Promise<void> {
   const { config, t3, linear, state } = ctx;
-  const modelSelection = settings.model ?? project.defaultModelSelection;
-  if (!modelSelection) {
-    throw new Error(
-      `No model configured for project "${projectRef}" and the T3 project has no default model`,
-    );
-  }
+  const modelSelection = modelFor(settings, project, projectRef);
 
   const { threadId, resumed } = await t3
     .launchThread({
@@ -303,8 +308,9 @@ function logDryRunHeader(
     let count: number;
     try {
       count = running.get(findProject(projects, projectRef).id) ?? 0;
-    } catch {
-      continue; // Its issues are logged as failing.
+    } catch (error) {
+      log(`project "${projectRef}": ${(error as Error).message}`);
+      continue;
     }
     log(`project "${projectRef}" has ${count}/${settings.maxRunningThreads} running`);
   }
@@ -389,7 +395,13 @@ async function launchCandidates(
       }
       let started = dryRun;
       if (dryRun) {
-        log(`${issue.identifier} ${inT3 ? "would record its existing thread" : "would start"}`);
+        try {
+          modelFor(settings, project, projectRef);
+          log(`${issue.identifier} ${inT3 ? "would record its existing thread" : "would start"}`);
+        } catch (error) {
+          log(`${issue.identifier} would fail: ${(error as Error).message}`);
+          continue;
+        }
       } else {
         try {
           await launchIssue(candidate, project, attempt, { config, t3, linear, state });

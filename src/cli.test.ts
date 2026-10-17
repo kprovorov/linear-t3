@@ -911,6 +911,44 @@ describe("cli run against fake Linear and T3", () => {
       expect(result.stdout).toContain("OPS-2 waiting: T3 has 3/3 running");
     });
 
+    test("--dry-run reports a model-less project as failing without taking a slot", async () => {
+      const { t3, dir, env } = await servers(
+        { projects: [project, infra] },
+        {
+          maxLaunchesPerPoll: 1,
+          defaults: { linear: { onLaunch: { comment: false } } },
+          projects: {
+            "my-app": { linear: { team: "ENG" } },
+            infra: {
+              linear: { team: "OPS" },
+              model: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+            },
+          },
+        },
+        [twoTeams[0]!, twoTeams[3]!],
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain('ENG-1 would fail: No model configured for project "my-app"');
+      expect(result.stdout).toContain("OPS-1 would start");
+      expect(t3.launches).toEqual([]);
+    });
+
+    test("--dry-run reports a capped project T3 doesn't know, even with no matching issues", async () => {
+      const { dir, env } = await servers(
+        {},
+        {
+          projects: {
+            "my-app": { linear: { team: "ENG" } },
+            ghost: { linear: { team: "OPS" }, maxRunningThreads: 1 },
+          },
+        },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain('project "ghost": No T3 project matches "ghost"');
+    });
+
     test("--dry-run marks a full project's issues as waiting on that project", async () => {
       const { t3, dir, env } = await twoProjects([manual(infra.id)], { global: 4, infra: 1 });
       const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
