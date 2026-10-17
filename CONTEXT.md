@@ -13,7 +13,7 @@ An external system linear-t3 connects to with a token, either T3 Code or Linear.
 _Avoid_: service, provider, connection
 
 **Config**:
-The user-edited settings: which T3 projects exist, their Linear teams and filters, and how their threads start.
+The user-edited settings: which T3 projects exist, their Linear teams and filters, how their threads start, and how many may run at once.
 _Avoid_: settings file, ecosystem
 
 **Credentials**:
