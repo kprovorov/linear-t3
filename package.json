@@ -1,6 +1,6 @@
 {
   "name": "linear-t3",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Daemon that polls Linear issues and launches T3 Code threads for them",
   "keywords": [
     "automation",
