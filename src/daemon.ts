@@ -210,7 +210,21 @@ async function poll(
   await launchCandidates(candidates, { config, linear, state, t3Token });
 }
 
-/** Matching issues not launched yet and not backing off, round-robin across projects. */
+// Linear priority runs 1 (Urgent) to 4 (Low); 0 is "No priority" and goes after Low.
+const priorityRank = (priority: number) => (priority === 0 ? 5 : priority);
+
+/** Most urgent first, then oldest first. */
+function byLaunchOrder(a: Candidate, b: Candidate): number {
+  return (
+    priorityRank(a.issue.priority) - priorityRank(b.issue.priority) ||
+    a.issue.createdAt.getTime() - b.issue.createdAt.getTime()
+  );
+}
+
+/**
+ * Matching issues not launched yet and not backing off, round-robin across projects. Each
+ * project's queue runs by priority, then oldest first.
+ */
 async function collectCandidates(
   config: Config,
   linear: LinearClient,
@@ -247,6 +261,7 @@ async function collectCandidates(
     if (queue) queue.push(candidate);
     else queues.set(candidate.projectRef, [candidate]);
   }
+  for (const queue of queues.values()) queue.sort(byLaunchOrder);
   const ordered: Candidate[] = [];
   for (let i = 0; ordered.length < pending.size; i++) {
     for (const queue of queues.values()) if (queue[i]) ordered.push(queue[i]!);

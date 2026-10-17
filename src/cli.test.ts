@@ -16,7 +16,7 @@ import { setTimeout } from "node:timers/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { type FakeT3Options, fakeLinear, fakeT3 } from "./fake-servers.ts";
+import { type FakeIssue, type FakeT3Options, fakeLinear, fakeT3 } from "./fake-servers.ts";
 
 const cliPath = fileURLToPath(new URL("./cli.ts", import.meta.url));
 const { version } = JSON.parse(
@@ -443,8 +443,12 @@ describe("cli run against fake Linear and T3", () => {
   const project = { id: "project-1", title: "my-app", workspaceRoot: "/work/my-app" };
 
   /** Fake servers, plus a fresh home whose XDG Config points at them; `config` is merged in. */
-  async function servers(t3Options: Partial<FakeT3Options> = {}, config = {}) {
-    const linear = await fakeLinear(issues);
+  async function servers(
+    t3Options: Partial<FakeT3Options> = {},
+    config = {},
+    linearIssues: FakeIssue[] = issues,
+  ) {
+    const linear = await fakeLinear(linearIssues);
     const t3 = await fakeT3({ projects: [project], ...t3Options });
     cleanup.push(linear.close, t3.close);
     const home = homeDir();
@@ -521,6 +525,66 @@ describe("cli run against fake Linear and T3", () => {
     expect(result.stdout).toContain("2 new issue(s): ENG-1, ENG-2");
     expect(linear.queries.some((q) => q.includes("issues"))).toBe(true);
     expect(t3.requests).toEqual([]);
+  });
+
+  /** Runs `run --once` `polls` times and returns the State's launched issue ids after each one. */
+  async function launchesPerPoll(polls: number, ...args: Parameters<typeof servers>) {
+    const { dir, env, files } = await servers(...args);
+    const seen: string[][] = [];
+    for (let i = 0; i < polls; i++) {
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      seen.push(launchedIds(files.state));
+    }
+    return seen;
+  }
+
+  test("launches the most urgent issue first and issues with no priority last", async () => {
+    const seen = await launchesPerPoll(3, {}, { maxLaunchesPerPoll: 1 }, [
+      { id: "none", identifier: "ENG-1", title: "No priority", priority: 0 },
+      { id: "medium", identifier: "ENG-2", title: "Medium", priority: 3 },
+      { id: "urgent", identifier: "ENG-3", title: "Urgent", priority: 1 },
+    ]);
+    expect(seen).toEqual([["urgent"], ["urgent", "medium"], ["urgent", "medium", "none"]]);
+  });
+
+  test("issues with the same priority launch oldest first", async () => {
+    const seen = await launchesPerPoll(2, {}, { maxLaunchesPerPoll: 1 }, [
+      {
+        id: "newer",
+        identifier: "ENG-2",
+        title: "Newer",
+        priority: 2,
+        createdAt: "2026-02-01T00:00:00Z",
+      },
+      {
+        id: "older",
+        identifier: "ENG-1",
+        title: "Older",
+        priority: 2,
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    expect(seen).toEqual([["older"], ["older", "newer"]]);
+  });
+
+  test("launches still alternate between projects", async () => {
+    const t3Projects = ["web", "ops"].map((title) => ({
+      id: title,
+      title,
+      workspaceRoot: `/work/${title}`,
+    }));
+    const config = {
+      maxLaunchesPerPoll: 3,
+      projects: { web: { linear: { team: "WEB" } }, ops: { linear: { team: "OPS" } } },
+    };
+    const seen = await launchesPerPoll(1, { projects: t3Projects }, config, [
+      { id: "web-1", identifier: "WEB-1", title: "Web urgent", priority: 1, team: "WEB" },
+      { id: "web-2", identifier: "WEB-2", title: "Web high", priority: 2, team: "WEB" },
+      { id: "ops-1", identifier: "OPS-1", title: "Ops low", priority: 4, team: "OPS" },
+      { id: "ops-2", identifier: "OPS-2", title: "Ops none", priority: 0, team: "OPS" },
+    ]);
+    expect(seen).toEqual([["web-1", "ops-1", "web-2"]]);
   });
 
   test("SIGTERM during a launch lets it finish and record, then exits 0 without starting more", async () => {
