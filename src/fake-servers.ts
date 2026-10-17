@@ -20,7 +20,7 @@ export interface FakeIssue {
 function filteredTeam(variables: unknown): string | undefined {
   const filter = (variables as { filter?: { and?: { team?: { key?: { eq?: string } } }[] } })
     ?.filter;
-  return filter?.and?.[0]?.team?.key?.eq;
+  return filter?.and?.find((clause) => clause.team)?.team?.key?.eq;
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -36,7 +36,8 @@ async function listen(server: Server): Promise<string> {
 
 /**
  * A Linear GraphQL API that answers the viewer query with a fixed user and every other query with
- * `issues`, keeping only those of the team the query filters on. With `apiKey` set, any other key gets Linear's authentication error.
+ * `issues`, keeping only those of the team the query filters on. With `apiKey` set, any other key
+ * gets Linear's authentication error.
  */
 export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: string } = {}) {
   const queries: string[] = [];
@@ -70,6 +71,8 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
       priority: 0,
       createdAt: new Date(0).toISOString(),
       ...issue,
+      // A team key isn't the SDK's team object, so leave it out.
+      team: undefined,
       updatedAt: new Date(0).toISOString(),
       // The SDK's Issue model reads these unconditionally.
       sharedAccess: { isShared: false, sharedWithCount: 0, sharedWithUsers: [] },

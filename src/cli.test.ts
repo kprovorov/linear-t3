@@ -568,7 +568,7 @@ describe("cli run against fake Linear and T3", () => {
     expect(seen).toEqual([["older"], ["older", "newer"]]);
   });
 
-  test("launches still alternate between projects", async () => {
+  test("launches alternate between projects, whatever their priorities", async () => {
     const t3Projects = ["web", "ops"].map((title) => ({
       id: title,
       title,
