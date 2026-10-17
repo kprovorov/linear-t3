@@ -24,19 +24,23 @@ export interface T3Thread {
   status: string;
   // preparing | starting | running | waiting (draining after the turn), or null when idle.
   activityRunStatus: string | null;
-  // An approval or user-input wait. On its own it doesn't make a thread Running.
-  pendingRuntimeRequest: unknown;
+  // An approval or user-input wait, which T3 shows ahead of the run's activity.
+  pendingRuntimeRequest: { kind: string } | null;
   pendingBackgroundTasks?: { kind: string }[];
 }
 
-// Background work that keeps a completed thread Running (T3's "background work holds completion").
+// Background work that keeps a thread Running after its run ends, unless the run failed
+// (T3's "background work holds completion").
 const HOLDING_TASK_KINDS = new Set(["subagent", "monitor", "background_task"]);
 
 /** Whether a snapshot thread is a Running thread (see CONTEXT.md). */
 export function isRunningThread(thread: T3Thread): boolean {
+  // Waiting for the user, even mid-run. An auth refresh isn't a user wait.
+  const request = thread.pendingRuntimeRequest;
+  if (request && request.kind !== "auth_refresh") return false;
   if (thread.activityRunStatus != null || thread.status === "queued") return true;
   return (
-    thread.status === "completed" &&
+    thread.status !== "failed" &&
     (thread.pendingBackgroundTasks ?? []).some((task) => HOLDING_TASK_KINDS.has(task.kind))
   );
 }

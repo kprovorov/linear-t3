@@ -655,6 +655,32 @@ describe("cli run against fake Linear and T3", () => {
         counts: false,
       },
       { case: "completed", thread: {}, counts: false },
+      {
+        case: "mid-run but blocked on an approval",
+        thread: { activityRunStatus: "running", pendingRuntimeRequest: { kind: "approval" } },
+        counts: false,
+      },
+      {
+        case: "mid-run with only an auth refresh pending",
+        thread: { activityRunStatus: "running", pendingRuntimeRequest: { kind: "auth_refresh" } },
+        counts: true,
+      },
+      {
+        case: "interrupted with a running monitor",
+        thread: {
+          status: "interrupted",
+          pendingBackgroundTasks: [{ taskId: "task-1", kind: "monitor" }],
+        },
+        counts: true,
+      },
+      {
+        case: "failed with a leftover subagent",
+        thread: {
+          status: "failed",
+          pendingBackgroundTasks: [{ taskId: "task-1", kind: "subagent" }],
+        },
+        counts: false,
+      },
     ])("a thread that is $case counts: $counts", async ({ thread, counts }) => {
       // Started by hand in another project: it still counts toward the global cap.
       const manual = { id: "t-manual", projectId: "other-project", ...thread };
