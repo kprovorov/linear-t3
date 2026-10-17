@@ -288,18 +288,19 @@ async function launchCandidates(
     const { projects, threads } = await t3
       .readShell()
       .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
-    const running = threads.filter(isRunningThread).length;
+    const runningInT3 = threads.filter(isRunningThread).length;
     const cap = config.maxRunningThreads ?? Infinity;
     let launched = 0;
     const waiting: Candidate[] = [];
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
     for (const candidate of candidates) {
-      if (launched >= config.maxLaunchesPerPoll || shutdown.signal.aborted) break;
+      if (shutdown.signal.aborted) break;
       // Held back, not failed: no backoff, so it's a candidate again next poll.
-      if (running + launched >= cap) {
+      if (runningInT3 + launched >= cap) {
         waiting.push(candidate);
         continue;
       }
+      if (launched >= config.maxLaunchesPerPoll) break;
       try {
         const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
         const project = findProject(projects, candidate.projectRef);
@@ -315,7 +316,7 @@ async function launchCandidates(
     }
     if (waiting.length > 0) {
       log(
-        `maxRunningThreads ${cap} reached (${running} running in T3, ${launched} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
+        `maxRunningThreads ${cap} reached (${runningInT3} running in T3, ${launched} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
       );
     }
   } finally {

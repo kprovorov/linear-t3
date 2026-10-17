@@ -674,7 +674,8 @@ describe("cli run against fake Linear and T3", () => {
         output += data.toString();
         // The running thread finishes after the first poll held everything back.
         if (output.includes("waiting: ENG-1, ENG-2")) threads.splice(0);
-        if (output.includes("ENG-1: started")) cli.child.kill("SIGTERM");
+        // Once: a second SIGTERM landing while the CLI exits would kill it.
+        if (output.includes("ENG-1: started") && !cli.child.killed) cli.child.kill("SIGTERM");
       });
       const result = await cli.result;
       expect(result).toMatchObject({ status: 0, stderr: "" });

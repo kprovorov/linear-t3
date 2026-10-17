@@ -29,7 +29,7 @@ export interface T3Thread {
   pendingBackgroundTasks?: { kind: string }[];
 }
 
-// Background work that keeps a completed thread busy (T3's "background work holds completion").
+// Background work that keeps a completed thread Running (T3's "background work holds completion").
 const HOLDING_TASK_KINDS = new Set(["subagent", "monitor", "background_task"]);
 
 /** Whether a snapshot thread is a Running thread (see CONTEXT.md). */
@@ -250,7 +250,7 @@ export class T3Client {
     });
   }
 
-  /** T3's projects and active threads, from one snapshot. */
+  /** T3's projects and unarchived threads, from one snapshot. */
   async readShell(): Promise<T3Shell> {
     const { projects, threads } = await this.shellSnapshot();
     return { projects, threads };
