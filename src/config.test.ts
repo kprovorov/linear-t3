@@ -20,4 +20,20 @@ describe("loadConfig", () => {
     expect(config).not.toHaveProperty("fullScanIntervalMinutes");
     expect(config.projects.app?.linear.team).toBe("ENG");
   });
+
+  test.each([-1, 1.5, "2"])("rejects maxRunningThreads %j", async (value) => {
+    const path = writeConfig({
+      maxRunningThreads: value,
+      projects: { app: { linear: { team: "ENG" } } },
+    });
+    await expect(loadConfig(path)).rejects.toThrow(/maxRunningThreads/);
+  });
+
+  test.each([0, 3, undefined])("accepts maxRunningThreads %j", async (value) => {
+    const path = writeConfig({
+      maxRunningThreads: value,
+      projects: { app: { linear: { team: "ENG" } } },
+    });
+    expect((await loadConfig(path)).maxRunningThreads).toBe(value);
+  });
 });

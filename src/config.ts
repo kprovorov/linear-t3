@@ -82,6 +82,8 @@ const Config = z
     pollIntervalSeconds: z.number().int().min(10).default(60),
     // Caps how many threads are started per poll so a broad filter can't flood T3.
     maxLaunchesPerPoll: z.number().int().min(1).default(5),
+    // Caps Running threads across all of T3, including threads started by hand. Unset means no cap.
+    maxRunningThreads: z.number().int().min(0).optional(),
     // Relative to the Config file's directory. Unset means the XDG State location.
     stateFile: z.string().optional(),
     t3: z

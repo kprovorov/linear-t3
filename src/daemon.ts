@@ -14,7 +14,14 @@ import {
 } from "./linear.ts";
 import { type Paths, resolveStateFile } from "./paths.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
-import { T3Client, T3ThreadNotCreated, type T3Project, type WorkspaceStrategy } from "./t3.ts";
+import {
+  T3Client,
+  T3ThreadNotCreated,
+  isRunningThread,
+  threadIdFor,
+  type T3Project,
+  type WorkspaceStrategy,
+} from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
@@ -85,6 +92,11 @@ async function recordOrStop(
   }
 }
 
+// Attempt 0 keeps the plain issue id; later attempts get a fresh thread id (see recordLaunchFailure).
+function launchKey(issueId: string, attempt: number): string {
+  return attempt === 0 ? issueId : `${issueId}:${attempt}`;
+}
+
 interface Candidate {
   issue: Issue;
   projectRef: string;
@@ -107,8 +119,7 @@ async function launchIssue(
 
   const { threadId, resumed } = await t3
     .launchThread({
-      // Attempt 0 keeps the plain issue id; later attempts get a fresh thread id (see recordLaunchFailure).
-      idempotencyKey: attempt === 0 ? issue.id : `${issue.id}:${attempt}`,
+      idempotencyKey: launchKey(issue.id, attempt),
       projectId: project.id,
       title: `${issue.identifier}: ${issue.title}`,
       modelSelection,
@@ -279,25 +290,48 @@ async function launchCandidates(
     // Shutdown may arrive while reading projects; closing the socket ends that wait.
     const closeOnShutdown = () => t3.close();
     shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
-    const projects = await t3
-      .listProjects()
+    const { projects, threads } = await t3
+      .readShell()
       .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
+    const runningInT3 = threads.filter(isRunningThread).length;
+    const cap = config.maxRunningThreads ?? Infinity;
+    const threadIds = new Set(threads.map((thread) => thread.id));
+    // New threads this poll, which count as Running until the next snapshot.
     let launched = 0;
+    const waiting: Candidate[] = [];
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
     for (const candidate of candidates) {
-      if (launched >= config.maxLaunchesPerPoll || shutdown.signal.aborted) break;
+      if (shutdown.signal.aborted) break;
+      const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
+      // T3 already has this issue's thread from a launch whose outcome was lost, and counts it.
+      // Launching again only records it, so it needs no room under either limit.
+      const inT3 = threadIds.has(threadIdFor(launchKey(candidate.issue.id, attempt)));
+      if (!inT3) {
+        // Held back, not failed: no backoff, so it's a candidate again next poll.
+        if (runningInT3 + launched >= cap) {
+          waiting.push(candidate);
+          continue;
+        }
+        if (launched >= config.maxLaunchesPerPoll) continue;
+      }
+      let started = false;
       try {
-        const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
         const project = findProject(projects, candidate.projectRef);
         await launchIssue(candidate, project, attempt, { config, t3, linear, state });
         launchFailures.delete(candidate.issue.id);
-        launched++;
+        started = true;
       } catch (error) {
         if (error instanceof StateWriteError) throw error;
-        if (error instanceof LaunchMayHaveStarted) launched++;
+        started = error instanceof LaunchMayHaveStarted;
         recordLaunchFailure(candidate.issue.id, error);
         log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
       }
+      if (started && !inT3) launched++;
+    }
+    if (waiting.length > 0) {
+      log(
+        `maxRunningThreads ${cap} reached (${runningInT3} running in T3, ${launched} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
+      );
     }
   } finally {
     t3.close();
