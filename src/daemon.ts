@@ -296,23 +296,24 @@ async function launchCandidates(
     const runningInT3 = threads.filter(isRunningThread).length;
     const cap = config.maxRunningThreads ?? Infinity;
     const threadIds = new Set(threads.map((thread) => thread.id));
+    // New threads this poll, which count as Running until the next snapshot.
     let launched = 0;
-    // Threads this poll added to T3, which count as Running until the next snapshot.
-    let added = 0;
     const waiting: Candidate[] = [];
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
     for (const candidate of candidates) {
       if (shutdown.signal.aborted) break;
       const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
       // T3 already has this issue's thread from a launch whose outcome was lost, and counts it.
-      // Launching again only records it, so it needs no room.
+      // Launching again only records it, so it needs no room under either limit.
       const inT3 = threadIds.has(threadIdFor(launchKey(candidate.issue.id, attempt)));
-      // Held back, not failed: no backoff, so it's a candidate again next poll.
-      if (!inT3 && runningInT3 + added >= cap) {
-        waiting.push(candidate);
-        continue;
+      if (!inT3) {
+        // Held back, not failed: no backoff, so it's a candidate again next poll.
+        if (runningInT3 + launched >= cap) {
+          waiting.push(candidate);
+          continue;
+        }
+        if (launched >= config.maxLaunchesPerPoll) continue;
       }
-      if (launched >= config.maxLaunchesPerPoll) break;
       let started = false;
       try {
         const project = findProject(projects, candidate.projectRef);
@@ -325,14 +326,11 @@ async function launchCandidates(
         recordLaunchFailure(candidate.issue.id, error);
         log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
       }
-      if (started) {
-        launched++;
-        if (!inT3) added++;
-      }
+      if (started && !inT3) launched++;
     }
     if (waiting.length > 0) {
       log(
-        `maxRunningThreads ${cap} reached (${runningInT3} running in T3, ${added} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
+        `maxRunningThreads ${cap} reached (${runningInT3} running in T3, ${launched} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
       );
     }
   } finally {

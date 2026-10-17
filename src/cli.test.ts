@@ -710,11 +710,11 @@ describe("cli run against fake Linear and T3", () => {
       expect(result.stdout).not.toContain("failed to start");
     }, 20_000);
 
-    test("a launch cut off at a full cap is recorded on the next run without taking a slot", async () => {
+    /** Servers where T3 creates ENG-1's thread, but the first `run --once` dies before recording it. */
+    async function cutOffFirstLaunch(config: Record<string, unknown>) {
       const threads: FakeThread[] = [];
       let first: ReturnType<typeof startCli> | undefined;
-      const { t3, dir, env, files } = await servers(
-        // T3 creates the thread, but the first CLI dies before hearing back or recording it.
+      const setup = await servers(
         {
           threads,
           onLaunch: async () => {
@@ -724,11 +724,16 @@ describe("cli run against fake Linear and T3", () => {
             await dying?.result;
           },
         },
-        { maxRunningThreads: 1 },
+        config,
       );
-      first = startCli({ cwd: dir, env }, ["run", "--once"]);
+      first = startCli({ cwd: setup.dir, env: setup.env }, ["run", "--once"]);
       await first.result;
-      expect(launchedIds(files.state)).toEqual([]);
+      expect(launchedIds(setup.files.state)).toEqual([]);
+      return { ...setup, threads };
+    }
+
+    test("a launch cut off at a full cap is recorded on the next run without taking a slot", async () => {
+      const { t3, dir, env, files, threads } = await cutOffFirstLaunch({ maxRunningThreads: 1 });
 
       // That thread now fills the cap; recording it must not need room.
       const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
@@ -736,6 +741,14 @@ describe("cli run against fake Linear and T3", () => {
       expect(launchedIds(files.state)).toEqual(["issue-1"]);
       expect(t3.launches.map((l) => l.threadId)).toEqual([threads[0]!.id, threads[0]!.id]);
       expect(result.stdout).toContain("waiting: ENG-2");
+    });
+
+    test("recording a cut-off launch doesn't use up maxLaunchesPerPoll", async () => {
+      const { t3, dir, env, files } = await cutOffFirstLaunch({ maxLaunchesPerPoll: 1 });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launchedIds(files.state)).toEqual(["issue-1", "issue-2"]);
+      expect(t3.launches).toHaveLength(3);
     });
 
     test.each([
