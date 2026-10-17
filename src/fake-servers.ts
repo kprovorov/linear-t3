@@ -8,6 +8,19 @@ export interface FakeIssue {
   id: string;
   identifier: string;
   title: string;
+  /** Linear priority: 0 No priority, 1 Urgent … 4 Low. Default 0. */
+  priority?: number;
+  /** ISO timestamp. Default the epoch. */
+  createdAt?: string;
+  /** Team key. When set, the issue only matches queries filtered to this team. */
+  team?: string;
+}
+
+/** The team key the Daemon's issue filter asks for, if any. */
+function filteredTeam(variables: unknown): string | undefined {
+  const filter = (variables as { filter?: { and?: { team?: { key?: { eq?: string } } }[] } })
+    ?.filter;
+  return filter?.and?.find((clause) => clause.team)?.team?.key?.eq;
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -23,14 +36,18 @@ async function listen(server: Server): Promise<string> {
 
 /**
  * A Linear GraphQL API that answers the viewer query with a fixed user and every other query with
- * `issues`. With `apiKey` set, any other key gets Linear's authentication error.
+ * `issues`, keeping only those of the team the query filters on. With `apiKey` set, any other key
+ * gets Linear's authentication error.
  */
 export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: string } = {}) {
   const queries: string[] = [];
   // The API key each request was sent with.
   const apiKeys: (string | undefined)[] = [];
   const server = createServer(async (req, res) => {
-    const { query } = JSON.parse(await readBody(req)) as { query: string };
+    const { query, variables } = JSON.parse(await readBody(req)) as {
+      query: string;
+      variables?: unknown;
+    };
     queries.push(query);
     apiKeys.push(req.headers.authorization);
     res.setHeader("content-type", "application/json");
@@ -45,12 +62,17 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
       res.end(JSON.stringify({ data: { viewer } }));
       return;
     }
-    const nodes = issues.map((issue) => ({
-      ...issue,
+    const team = filteredTeam(variables);
+    const matching = issues.filter((issue) => issue.team === undefined || issue.team === team);
+    const nodes = matching.map((issue) => ({
       url: `https://linear.app/acme/issue/${issue.identifier}`,
       description: null,
       branchName: issue.identifier.toLowerCase(),
+      priority: 0,
       createdAt: new Date(0).toISOString(),
+      ...issue,
+      // A team key isn't the SDK's team object, so leave it out.
+      team: undefined,
       updatedAt: new Date(0).toISOString(),
       // The SDK's Issue model reads these unconditionally.
       sharedAccess: { isShared: false, sharedWithCount: 0, sharedWithUsers: [] },
