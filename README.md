@@ -89,15 +89,16 @@ linear-t3 keeps its files in [XDG](https://specifications.freedesktop.org/basedi
 
 `setup` writes a starter Config. The main keys:
 
-| Key                   | Description                                                                                 |
-| --------------------- | ------------------------------------------------------------------------------------------- |
-| `pollIntervalSeconds` | How often to poll Linear. Default `60`.                                                     |
-| `maxLaunchesPerPoll`  | Maximum number of threads started per poll. Default `5`. See [Launch order](#launch-order). |
-| `stateFile`           | Where State is kept, relative to the Config's directory. Default: the XDG State location.   |
-| `t3.url`              | T3 server URL. Default `http://127.0.0.1:3773`.                                             |
-| `t3.webUrl`           | Optional public T3 web URL. When set, the Linear comment includes a clickable thread link.  |
-| `defaults`            | Settings shared by every project. Takes any project setting below except `linear.team`.     |
-| `projects`            | One entry per T3 project. The key is the T3 project id, title or workspace path.            |
+| Key                   | Description                                                                                                                                                                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pollIntervalSeconds` | How often to poll Linear. Default `60`.                                                                                                                                                                                                      |
+| `maxLaunchesPerPoll`  | Maximum number of threads started per poll. Default `5`. See [Launch order](#launch-order).                                                                                                                                                  |
+| `maxRunningThreads`   | Maximum number of [Running threads](CONTEXT.md) across all of T3, including threads you started by hand. The Daemon only launches while there's room; issues that don't fit wait for a later poll. Unset means no cap, `0` launches nothing. |
+| `stateFile`           | Where State is kept, relative to the Config's directory. Default: the XDG State location.                                                                                                                                                    |
+| `t3.url`              | T3 server URL. Default `http://127.0.0.1:3773`.                                                                                                                                                                                              |
+| `t3.webUrl`           | Optional public T3 web URL. When set, the Linear comment includes a clickable thread link.                                                                                                                                                   |
+| `defaults`            | Settings shared by every project. Takes any project setting below except `linear.team`.                                                                                                                                                      |
+| `projects`            | One entry per T3 project. The key is the T3 project id, title or workspace path.                                                                                                                                                             |
 
 Project settings. Each value comes from the project if it sets one, otherwise from `defaults`, otherwise from the built-in default below. Objects (`workspace`, `model`, `linear.filter`) are replaced as a whole, but `linear.onLaunch` is merged key by key, so a project can set only `moveToState` and keep the shared `comment`.
 
@@ -115,7 +116,7 @@ Project settings. Each value comes from the project if it sets one, otherwise fr
 
 ## Launch order
 
-When more issues match than the Daemon can start, it picks them in this order. Within each project, issues go by Linear priority, Urgent first and Low last, with "No priority" after Low. Issues with the same priority go oldest first. Across projects, each poll takes one issue from each project in turn, starting with the first project in the Config. So a busy project can't use up a poll's `maxLaunchesPerPoll` on its own, but when that cap is smaller than the number of projects, the projects listed first get the slots.
+When more issues match than the Daemon can start, it picks them in this order. Within each project, issues go by Linear priority, Urgent first and Low last, with "No priority" after Low. Issues with the same priority go oldest first. Across projects, each poll takes one issue from each project in turn, starting with the first project in the Config. So a busy project can't use up a poll's `maxLaunchesPerPoll` on its own, but when that cap is smaller than the number of projects, the projects listed first get the slots. Issues held back by `maxRunningThreads` are picked in the same order once there's room.
 
 ## How it talks to T3 Code
 

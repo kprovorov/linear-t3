@@ -17,6 +17,35 @@ export interface T3Project {
   defaultModelSelection: ModelSelection | null;
 }
 
+/** A thread in the shell snapshot, with the fields that tell whether it's a Running thread. */
+export interface T3Thread {
+  id: string;
+  projectId: string;
+  status: string;
+  // preparing | starting | running | waiting (draining after the turn), or null when idle.
+  activityRunStatus: string | null;
+  // An approval or user-input wait. On its own it doesn't make a thread Running.
+  pendingRuntimeRequest: unknown;
+  pendingBackgroundTasks?: { kind: string }[];
+}
+
+// Background work that keeps a completed thread busy (T3's "background work holds completion").
+const HOLDING_TASK_KINDS = new Set(["subagent", "monitor", "background_task"]);
+
+/** Whether a snapshot thread is a Running thread (see CONTEXT.md). */
+export function isRunningThread(thread: T3Thread): boolean {
+  if (thread.activityRunStatus != null || thread.status === "queued") return true;
+  return (
+    thread.status === "completed" &&
+    (thread.pendingBackgroundTasks ?? []).some((task) => HOLDING_TASK_KINDS.has(task.kind))
+  );
+}
+
+export interface T3Shell {
+  projects: T3Project[];
+  threads: T3Thread[];
+}
+
 export type WorkspaceStrategy =
   | { type: "root"; branch?: string }
   | { type: "worktree"; baseRef: string; branch?: string; startFromOrigin?: boolean };
@@ -63,9 +92,7 @@ export class T3RpcFailure extends Error {}
 /** A launch failed and T3's state confirms the thread doesn't exist (never created, or deleted). */
 export class T3ThreadNotCreated extends Error {}
 
-interface ShellSnapshot {
-  projects: T3Project[];
-  threads: { id: string }[];
+interface ShellSnapshot extends T3Shell {
   // Only in some T3 versions; archived threads also come from getArchivedShellSnapshot.
   archivedThreads?: { id: string }[];
 }
@@ -223,8 +250,10 @@ export class T3Client {
     });
   }
 
-  async listProjects(): Promise<T3Project[]> {
-    return (await this.shellSnapshot()).projects;
+  /** T3's projects and active threads, from one snapshot. */
+  async readShell(): Promise<T3Shell> {
+    const { projects, threads } = await this.shellSnapshot();
+    return { projects, threads };
   }
 
   /** Whether T3 has the thread, active or archived. Deleted threads are absent from both snapshots. */

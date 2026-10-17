@@ -138,8 +138,20 @@ interface RpcRequest {
   payload: Record<string, unknown>;
 }
 
+/** A thread in the shell snapshot, with T3 0.1.0's run-state fields. */
+export interface FakeThread {
+  id: string;
+  projectId: string;
+  status?: string;
+  activityRunStatus?: string | null;
+  pendingRuntimeRequest?: { kind: string } | null;
+  pendingBackgroundTasks?: { taskId: string; kind: string }[];
+}
+
 export interface FakeT3Options {
   projects: { id: string; title: string; workspaceRoot: string }[];
+  /** The snapshot's threads, read at each snapshot so a test can change them between polls. */
+  threads?: FakeThread[];
   /** When set, the ticket endpoint answers 401 to any other bearer token. */
   token?: string;
   /** Called for each launch; the launch succeeds once it resolves. */
@@ -147,7 +159,7 @@ export interface FakeT3Options {
 }
 
 /** A T3 Code server: the websocket ticket endpoint plus the shell and launch RPCs. */
-export async function fakeT3({ projects, token, onLaunch }: FakeT3Options) {
+export async function fakeT3({ projects, threads = [], token, onLaunch }: FakeT3Options) {
   const requests: string[] = [];
   const launches: Record<string, unknown>[] = [];
   const sockets = new Set<Duplex>();
@@ -194,7 +206,15 @@ export async function fakeT3({ projects, token, onLaunch }: FakeT3Options) {
         const message = JSON.parse(text) as RpcRequest;
         if (message._tag !== "Request") continue;
         if (message.tag === "orchestration.subscribeShell") {
-          const snapshot = { projects, threads: [] };
+          const snapshot = {
+            projects,
+            threads: threads.map((thread) => ({
+              status: "completed",
+              activityRunStatus: null,
+              pendingRuntimeRequest: null,
+              ...thread,
+            })),
+          };
           send({ _tag: "Chunk", requestId: message.id, values: [{ kind: "snapshot", snapshot }] });
         } else if (message.tag === "orchestration.launchThread") {
           launches.push(message.payload);

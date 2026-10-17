@@ -16,7 +16,13 @@ import { setTimeout } from "node:timers/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { type FakeIssue, type FakeT3Options, fakeLinear, fakeT3 } from "./fake-servers.ts";
+import {
+  type FakeIssue,
+  type FakeT3Options,
+  type FakeThread,
+  fakeLinear,
+  fakeT3,
+} from "./fake-servers.ts";
 
 const cliPath = fileURLToPath(new URL("./cli.ts", import.meta.url));
 const { version } = JSON.parse(
@@ -83,10 +89,10 @@ function runCliIn(options: { cwd?: string; env?: Record<string, string> }, ...ar
 
 /**
  * Starts the CLI without blocking, so fake servers in this process can answer it. `cli` runs the
- * CLI from another path.
+ * CLI from another path; `killAfterMs` is how long it may run.
  */
 function startCli(
-  options: { cwd: string; env: Record<string, string>; cli?: string },
+  options: { cwd: string; env: Record<string, string>; cli?: string; killAfterMs?: number },
   args: string[],
 ) {
   const child = spawn(process.execPath, [options.cli ?? cliPath, ...args], {
@@ -98,7 +104,7 @@ function startCli(
   let stderr = "";
   child.stdout.on("data", (data: Buffer) => (stdout += data.toString()));
   child.stderr.on("data", (data: Buffer) => (stderr += data.toString()));
-  const timer = globalThis.setTimeout(() => child.kill("SIGKILL"), 10_000);
+  const timer = globalThis.setTimeout(() => child.kill("SIGKILL"), options.killAfterMs ?? 10_000);
   const result = new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) =>
     child.on("close", (status) => {
       clearTimeout(timer);
@@ -602,6 +608,97 @@ describe("cli run against fake Linear and T3", () => {
     expect(result.stdout).toMatch(/ENG-1: started T3 thread \S+ in "my-app"/);
     expect(t3.launches).toHaveLength(1);
     expect(launchedIds(files.state)).toEqual(["issue-1"]);
+  });
+
+  describe("maxRunningThreads", () => {
+    const threeIssues = [...issues, { id: "issue-3", identifier: "ENG-3", title: "Third" }];
+    const running: FakeThread = {
+      id: "t-run",
+      projectId: project.id,
+      activityRunStatus: "running",
+    };
+
+    test("starts only what fits under the cap and names the issues left waiting", async () => {
+      const { t3, dir, env, files } = await servers(
+        { threads: [running] },
+        { maxRunningThreads: 2 },
+        threeIssues,
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches).toHaveLength(1);
+      expect(launchedIds(files.state)).toEqual(["issue-1"]);
+      expect(result.stdout).toContain("maxRunningThreads 2 reached");
+      expect(result.stdout).toContain("waiting: ENG-2, ENG-3");
+    });
+
+    test.each<{ case: string; thread: Omit<FakeThread, "id" | "projectId">; counts: boolean }>([
+      {
+        case: "waiting only for approval",
+        thread: { status: "running", pendingRuntimeRequest: { kind: "approval" } },
+        counts: false,
+      },
+      { case: "queued", thread: { status: "queued" }, counts: true },
+      {
+        case: "draining after its turn",
+        thread: { status: "completed", activityRunStatus: "waiting" },
+        counts: true,
+      },
+      {
+        case: "completed with a running subagent",
+        thread: { pendingBackgroundTasks: [{ taskId: "task-1", kind: "subagent" }] },
+        counts: true,
+      },
+      {
+        case: "completed with only a pending command",
+        thread: { pendingBackgroundTasks: [{ taskId: "task-1", kind: "command" }] },
+        counts: false,
+      },
+      { case: "completed", thread: {}, counts: false },
+    ])("a thread that is $case counts: $counts", async ({ thread, counts }) => {
+      // Started by hand in another project: it still counts toward the global cap.
+      const manual = { id: "t-manual", projectId: "other-project", ...thread };
+      const { t3, dir, env } = await servers({ threads: [manual] }, { maxRunningThreads: 1 });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches).toHaveLength(counts ? 0 : 1);
+    });
+
+    // Waits out the 10s minimum poll interval.
+    test("a held-back issue starts at the next poll with room, without backing off", async () => {
+      const threads = [running];
+      const { t3, dir, env, files } = await servers({ threads }, { maxRunningThreads: 1 });
+      const cli = startCli({ cwd: dir, env, killAfterMs: 20_000 }, ["run"]);
+      let output = "";
+      cli.child.stdout!.on("data", (data: Buffer) => {
+        output += data.toString();
+        // The running thread finishes after the first poll held everything back.
+        if (output.includes("waiting: ENG-1, ENG-2")) threads.splice(0);
+        if (output.includes("ENG-1: started")) cli.child.kill("SIGTERM");
+      });
+      const result = await cli.result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches).toHaveLength(1);
+      expect(launchedIds(files.state)).toEqual(["issue-1"]);
+      expect(result.stdout).not.toContain("failed to start");
+    }, 20_000);
+
+    test.each([
+      { cap: undefined, launches: 2 },
+      { cap: 0, launches: 0 },
+    ])(
+      "with the cap at $cap, starts $launches of 3 under maxLaunchesPerPoll 2",
+      async ({ cap, launches }) => {
+        const { t3, dir, env } = await servers(
+          { threads: [running] },
+          { maxRunningThreads: cap, maxLaunchesPerPoll: 2 },
+          threeIssues,
+        );
+        const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+        expect(result).toMatchObject({ status: 0, stderr: "" });
+        expect(t3.launches).toHaveLength(launches);
+      },
+    );
   });
 
   test("SIGINT while waiting for the next poll exits 0", async () => {

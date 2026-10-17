@@ -14,7 +14,13 @@ import {
 } from "./linear.ts";
 import { type Paths, resolveStateFile } from "./paths.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
-import { T3Client, T3ThreadNotCreated, type T3Project, type WorkspaceStrategy } from "./t3.ts";
+import {
+  T3Client,
+  T3ThreadNotCreated,
+  isRunningThread,
+  type T3Project,
+  type WorkspaceStrategy,
+} from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
@@ -279,13 +285,21 @@ async function launchCandidates(
     // Shutdown may arrive while reading projects; closing the socket ends that wait.
     const closeOnShutdown = () => t3.close();
     shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
-    const projects = await t3
-      .listProjects()
+    const { projects, threads } = await t3
+      .readShell()
       .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
+    const running = threads.filter(isRunningThread).length;
+    const cap = config.maxRunningThreads ?? Infinity;
     let launched = 0;
+    const waiting: Candidate[] = [];
     // Keep going past failures until the cap is reached, so a broken issue can't block later ones.
     for (const candidate of candidates) {
       if (launched >= config.maxLaunchesPerPoll || shutdown.signal.aborted) break;
+      // Held back, not failed: no backoff, so it's a candidate again next poll.
+      if (running + launched >= cap) {
+        waiting.push(candidate);
+        continue;
+      }
       try {
         const attempt = launchFailures.get(candidate.issue.id)?.attempt ?? 0;
         const project = findProject(projects, candidate.projectRef);
@@ -298,6 +312,11 @@ async function launchCandidates(
         recordLaunchFailure(candidate.issue.id, error);
         log(`${candidate.issue.identifier}: failed to start thread: ${(error as Error).message}`);
       }
+    }
+    if (waiting.length > 0) {
+      log(
+        `maxRunningThreads ${cap} reached (${running} running in T3, ${launched} started this poll); waiting: ${waiting.map((c) => c.issue.identifier).join(", ")}`,
+      );
     }
   } finally {
     t3.close();
