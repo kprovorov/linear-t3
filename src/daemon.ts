@@ -97,6 +97,16 @@ function launchKey(issueId: string, attempt: number): string {
   return attempt === 0 ? issueId : `${issueId}:${attempt}`;
 }
 
+function modelFor(settings: ProjectSettings, project: T3Project, projectRef: string) {
+  const modelSelection = settings.model ?? project.defaultModelSelection;
+  if (!modelSelection) {
+    throw new Error(
+      `No model configured for project "${projectRef}" and the T3 project has no default model`,
+    );
+  }
+  return modelSelection;
+}
+
 interface Candidate {
   issue: Issue;
   projectRef: string;
@@ -110,12 +120,7 @@ async function launchIssue(
   ctx: { config: Config; t3: T3Client; linear: LinearClient; state: StateStore },
 ): Promise<void> {
   const { config, t3, linear, state } = ctx;
-  const modelSelection = settings.model ?? project.defaultModelSelection;
-  if (!modelSelection) {
-    throw new Error(
-      `No model configured for project "${projectRef}" and the T3 project has no default model`,
-    );
-  }
+  const modelSelection = modelFor(settings, project, projectRef);
 
   const { threadId, resumed } = await t3
     .launchThread({
@@ -220,10 +225,14 @@ async function poll(
   }
 
   const candidates = await collectCandidates(config, linear, state);
-  if (candidates.length === 0) return;
-  log(`${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`);
-  if (dryRun || shutdown.signal.aborted) return;
-  await launchCandidates(candidates, { config, linear, state, t3Token });
+  // A dry run still reads T3, to show the Running counts.
+  if (candidates.length === 0 && !dryRun) return;
+  if (candidates.length > 0)
+    log(
+      `${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`,
+    );
+  if (shutdown.signal.aborted) return;
+  await launchCandidates(candidates, { config, linear, state, t3Token, dryRun });
 }
 
 // Linear priority runs 1 (Urgent) to 4 (Low); 0 is "No priority" and goes after Low.
@@ -285,11 +294,43 @@ async function collectCandidates(
   return ordered;
 }
 
+/** A dry run's header: Running threads in T3, and in each project that has a cap. */
+function logDryRunHeader(
+  config: Config,
+  projects: T3Project[],
+  running: Map<string, number>,
+  runningInT3: number,
+): void {
+  const cap = config.maxRunningThreads;
+  log(`T3 has ${runningInT3}${cap === undefined ? "" : `/${cap}`} running`);
+  for (const [projectRef, settings] of Object.entries(config.projects)) {
+    if (settings.maxRunningThreads === undefined) continue;
+    let count: number;
+    try {
+      count = running.get(findProject(projects, projectRef).id) ?? 0;
+    } catch (error) {
+      log(`project "${projectRef}": ${(error as Error).message}`);
+      continue;
+    }
+    log(`project "${projectRef}" has ${count}/${settings.maxRunningThreads} running`);
+  }
+}
+
+/**
+ * Launches what fits under the caps, in order. A dry run walks the same order and caps, logging
+ * what would start and what would wait, and launches nothing.
+ */
 async function launchCandidates(
   candidates: Candidate[],
-  ctx: { config: Config; linear: LinearClient; state: StateStore; t3Token: string },
+  ctx: {
+    config: Config;
+    linear: LinearClient;
+    state: StateStore;
+    t3Token: string;
+    dryRun: boolean;
+  },
 ): Promise<void> {
-  const { config, linear, state, t3Token } = ctx;
+  const { config, linear, state, t3Token, dryRun } = ctx;
   const t3 = await T3Client.connect(config.t3.url, t3Token, shutdown.signal);
   try {
     // Shutdown may arrive while reading projects; closing the socket ends that wait.
@@ -307,6 +348,7 @@ async function launchCandidates(
     let runningInT3 = runningThreads.length;
     const cap = config.maxRunningThreads ?? Infinity;
     const threadIds = new Set(threads.map((thread) => thread.id));
+    if (dryRun) logDryRunHeader(config, projects, running, runningInT3);
     let launched = 0;
     // Keep going past failures and full projects, so neither can block later candidates. The cap
     // check needs the T3 project, so an unknown project ref fails even when nothing has room.
@@ -318,7 +360,8 @@ async function launchCandidates(
       try {
         project = findProject(projects, projectRef);
       } catch (error) {
-        failLaunch(issue, error);
+        if (dryRun) log(`${issue.identifier} would fail: ${(error as Error).message}`);
+        else failLaunch(issue, error);
         continue;
       }
       const runningInProject = running.get(project.id) ?? 0;
@@ -328,27 +371,47 @@ async function launchCandidates(
       const inT3 = threadIds.has(threadIdFor(launchKey(issue.id, attempt)));
       if (!inT3) {
         // Held back, not failed: no backoff, so it's a candidate again next poll.
+        // `label` names the full cap for a dry run; `reason` is what a real run logs, if anything.
+        let full: { label: string; reason?: string } | undefined;
         if (runningInT3 >= cap) {
-          log(`${issue.identifier} waiting: T3 has ${runningInT3}/${cap} running`);
+          full = {
+            label: `global ${runningInT3}/${cap}`,
+            reason: `T3 has ${runningInT3}/${cap} running`,
+          };
+        } else if (runningInProject >= projectCap) {
+          const count = `${runningInProject}/${projectCap}`;
+          full = {
+            label: `project "${projectRef}" ${count}`,
+            reason: `project "${projectRef}" has ${count} running`,
+          };
+        } else if (launched >= config.maxLaunchesPerPoll) {
+          full = { label: `maxLaunchesPerPoll ${launched}/${config.maxLaunchesPerPoll}` };
+        }
+        if (full) {
+          if (dryRun) log(`${issue.identifier} would wait (${full.label})`);
+          else if (full.reason) log(`${issue.identifier} waiting: ${full.reason}`);
           continue;
         }
-        if (runningInProject >= projectCap) {
-          log(
-            `${issue.identifier} waiting: project "${projectRef}" has ${runningInProject}/${projectCap} running`,
-          );
-          continue;
-        }
-        if (launched >= config.maxLaunchesPerPoll) continue;
       }
-      let started = false;
-      try {
-        await launchIssue(candidate, project, attempt, { config, t3, linear, state });
-        launchFailures.delete(issue.id);
-        started = true;
-      } catch (error) {
-        if (error instanceof StateWriteError) throw error;
-        started = error instanceof LaunchMayHaveStarted;
-        failLaunch(issue, error);
+      let started = dryRun;
+      if (dryRun) {
+        try {
+          modelFor(settings, project, projectRef);
+          log(`${issue.identifier} ${inT3 ? "would record its existing thread" : "would start"}`);
+        } catch (error) {
+          log(`${issue.identifier} would fail: ${(error as Error).message}`);
+          continue;
+        }
+      } else {
+        try {
+          await launchIssue(candidate, project, attempt, { config, t3, linear, state });
+          launchFailures.delete(issue.id);
+          started = true;
+        } catch (error) {
+          if (error instanceof StateWriteError) throw error;
+          started = error instanceof LaunchMayHaveStarted;
+          failLaunch(issue, error);
+        }
       }
       if (started && !inT3) {
         launched++;
@@ -376,7 +439,7 @@ export interface DaemonOptions {
   paths: Paths;
   // Do one poll, then exit.
   once: boolean;
-  // List the issues that would be launched without starting threads.
+  // Show which issues would start and which would wait on a cap, without starting threads.
   dryRun: boolean;
 }
 
@@ -393,9 +456,10 @@ export async function runDaemon({ paths, once, dryRun }: DaemonOptions): Promise
   const credentials = new EnvFile(paths.credentials);
   const linearKey = requireToken("LINEAR_API_KEY", credentials, "linear");
   const linear = createLinearClient(linearKey, shutdown.signal);
-  const t3Token = dryRun ? "" : requireToken("T3_TOKEN", credentials, "t3");
+  const t3Token = requireToken("T3_TOKEN", credentials, "t3");
   const state = new StateStore(resolveStateFile(paths, config.stateFile));
-  await state.load();
+  // A dry run launches nothing, so it never writes State.
+  await state.load({ checkWritable: !dryRun });
 
   const watching = Object.entries(config.projects).map(([ref, p]) => `${p.linear.team} -> ${ref}`);
   log(`watching ${watching.join(", ")}`);

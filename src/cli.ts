@@ -142,7 +142,7 @@ function runSetup(): void {
 
 async function runDaemonCommand({ once = false, dryRun = false }): Promise<void> {
   try {
-    // A dry run only lists issues, so polling again would just list them again.
+    // A dry run only reports, so polling again would just report the same again.
     await runDaemon({
       paths: paths(),
       once: once || dryRun,
@@ -283,7 +283,10 @@ program
   .command("run")
   .description("run the Daemon in the foreground: poll Linear and launch T3 threads")
   .option("--once", "do one poll, then exit")
-  .option("--dry-run", "list the issues it would launch without starting threads, then exit")
+  .option(
+    "--dry-run",
+    "show which issues would start now and which would wait on a cap, without starting threads, then exit",
+  )
   .action(runDaemonCommand);
 
 program

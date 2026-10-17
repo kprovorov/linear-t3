@@ -21,7 +21,7 @@ Edit the Config: list your T3 projects with their Linear teams and filters (see 
 
 ```sh
 linear-t3 connect   # saves a T3 token and a Linear API key to the Credentials file
-linear-t3 run --dry-run   # optional: lists the issues it would launch, then exits
+linear-t3 run --dry-run   # optional: shows which issues would start now and which would wait, then exits
 linear-t3 start     # runs the Daemon in the background, now and at every login
 linear-t3 status    # shows whether it's running and where its files are
 ```
@@ -32,17 +32,17 @@ To try it without installing, use `npx linear-t3` in place of `linear-t3` for ev
 
 Every command takes `--config <path>` to use another Config.
 
-| Command                | What it does                                                                                                                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `setup`                | Writes a starter Config from `config.template.json` to the Config path, creating its directory. Never overwrites an existing Config.                                            |
-| `connect [t3\|linear]` | Gets, checks and saves the T3 token and the Linear API key in the Credentials file. Without an argument it does both, T3 first. Interactive, so run it in a terminal.           |
-| `run`                  | Runs the Daemon in the foreground until SIGINT or SIGTERM. `--once` does one poll and exits. `--dry-run` lists the issues it would launch without starting threads, then exits. |
-| `start`                | Checks the Config and both tokens, then installs and starts the Daemon as a background service. Safe to run again, for example after upgrading linear-t3 or Node.               |
-| `stop`                 | Stops the Daemon and keeps it from starting at login until the next `start`.                                                                                                    |
-| `restart`              | Restarts the Daemon, for example to pick up Config changes.                                                                                                                     |
-| `status`               | Shows whether the Daemon is running and where the Config, Credentials, State, log and unit are.                                                                                 |
-| `logs [-f]`            | Shows the Daemon's recent output. `-f` (`--follow`) keeps printing new output.                                                                                                  |
-| `uninstall`            | Stops the Daemon and removes the background service. The Config, Credentials and State are kept.                                                                                |
+| Command                | What it does                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `setup`                | Writes a starter Config from `config.template.json` to the Config path, creating its directory. Never overwrites an existing Config.                                                             |
+| `connect [t3\|linear]` | Gets, checks and saves the T3 token and the Linear API key in the Credentials file. Without an argument it does both, T3 first. Interactive, so run it in a terminal.                            |
+| `run`                  | Runs the Daemon in the foreground until SIGINT or SIGTERM. `--once` does one poll and exits. `--dry-run` shows which issues would start now and which would wait, then exits; see [`run`](#run). |
+| `start`                | Checks the Config and both tokens, then installs and starts the Daemon as a background service. Safe to run again, for example after upgrading linear-t3 or Node.                                |
+| `stop`                 | Stops the Daemon and keeps it from starting at login until the next `start`.                                                                                                                     |
+| `restart`              | Restarts the Daemon, for example to pick up Config changes.                                                                                                                                      |
+| `status`               | Shows whether the Daemon is running and where the Config, Credentials, State, log and unit are.                                                                                                  |
+| `logs [-f]`            | Shows the Daemon's recent output. `-f` (`--follow`) keeps printing new output.                                                                                                                   |
+| `uninstall`            | Stops the Daemon and removes the background service. The Config, Credentials and State are kept.                                                                                                 |
 
 ### `connect`
 
@@ -55,6 +55,8 @@ Both write the Credentials file with mode `0600` and leave every other line alon
 ### `run`
 
 `run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment, else from the Credentials file (see [Files](#files)). On SIGINT or SIGTERM it lets the current launch finish and starts nothing new.
+
+`run --dry-run` does one poll and reports what it would do, applying the same caps as a real run. It needs both tokens, because it reads T3 to count Running threads. It prints how many threads are Running in T3 against `maxRunningThreads`, and in each project that has its own cap. Then it lists the matching issues in launch order, each marked `would start` or `would wait` with the cap that's full, for example `ENG-2 would wait (global 2/2)` or `OPS-1 would wait (project "infra" 1/1)`. `maxLaunchesPerPoll` counts as a cap too. It starts no threads, makes no changes in Linear and writes no State.
 
 ### Background service
 
