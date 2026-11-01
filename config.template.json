@@ -1,6 +1,5 @@
 {
   "pollIntervalSeconds": 60,
-  "maxLaunchesPerPoll": 5,
   "maxRunningThreads": 4,
   "t3": {
     "url": "http://127.0.0.1:3773"
@@ -11,7 +10,6 @@
     },
     "workspace": { "type": "worktree", "baseRef": "main", "startFromOrigin": true },
     "runtimeMode": "full-access",
-    "interactionMode": "default",
     "promptTemplate": "Work on Linear issue {identifier}: {title}\n\n{url}\n\n{description}"
   },
   "projects": {
@@ -36,10 +34,8 @@
       },
       "workspace": { "type": "root" },
       "runtimeMode": "approval-required",
-      "interactionMode": "plan",
       "model": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
-      "promptTemplate": "Investigate {identifier}: {title}\n\n{url}\n\n{description}\n\nWork on branch {branchName}.",
-      "maxRunningThreads": 1
+      "promptTemplate": "Investigate {identifier}: {title}\n\n{url}\n\n{description}\n\nWork on branch {branchName}."
     }
   }
 }

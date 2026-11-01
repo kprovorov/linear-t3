@@ -562,29 +562,25 @@ describe("cli run against fake Linear and T3", () => {
     expect(t3.launches).toEqual([]);
   });
 
-  /** Runs `run --once` `polls` times and returns the State's launched issue ids after each one. */
-  async function launchesPerPoll(polls: number, ...args: Parameters<typeof servers>) {
-    const { dir, env, files } = await servers(...args);
-    const seen: string[][] = [];
-    for (let i = 0; i < polls; i++) {
-      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      seen.push(launchedIds(files.state));
-    }
-    return seen;
+  /** Runs `run --once` and returns the identifiers of the issues it launched, in launch order. */
+  async function launchOrder(...args: Parameters<typeof servers>) {
+    const { dir, env, t3 } = await servers(...args);
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    return t3.launches.map((launch) => String(launch.title).split(":")[0]);
   }
 
   test("launches the most urgent issue first and issues with no priority last", async () => {
-    const seen = await launchesPerPoll(3, {}, { maxLaunchesPerPoll: 1 }, [
+    const order = await launchOrder({}, {}, [
       { id: "none", identifier: "ENG-1", title: "No priority", priority: 0 },
       { id: "medium", identifier: "ENG-2", title: "Medium", priority: 3 },
       { id: "urgent", identifier: "ENG-3", title: "Urgent", priority: 1 },
     ]);
-    expect(seen).toEqual([["urgent"], ["urgent", "medium"], ["urgent", "medium", "none"]]);
+    expect(order).toEqual(["ENG-3", "ENG-2", "ENG-1"]);
   });
 
   test("issues with the same priority launch oldest first", async () => {
-    const seen = await launchesPerPoll(2, {}, { maxLaunchesPerPoll: 1 }, [
+    const order = await launchOrder({}, {}, [
       {
         id: "newer",
         identifier: "ENG-2",
@@ -600,7 +596,7 @@ describe("cli run against fake Linear and T3", () => {
         createdAt: "2026-01-01T00:00:00Z",
       },
     ]);
-    expect(seen).toEqual([["older"], ["older", "newer"]]);
+    expect(order).toEqual(["ENG-1", "ENG-2"]);
   });
 
   test("launches alternate between projects, whatever their priorities", async () => {
@@ -610,16 +606,80 @@ describe("cli run against fake Linear and T3", () => {
       workspaceRoot: `/work/${title}`,
     }));
     const config = {
-      maxLaunchesPerPoll: 3,
       projects: { web: { linear: { team: "WEB" } }, ops: { linear: { team: "OPS" } } },
     };
-    const seen = await launchesPerPoll(1, { projects: t3Projects }, config, [
+    const order = await launchOrder({ projects: t3Projects }, config, [
       { id: "web-1", identifier: "WEB-1", title: "Web urgent", priority: 1, team: "WEB" },
       { id: "web-2", identifier: "WEB-2", title: "Web high", priority: 2, team: "WEB" },
       { id: "ops-1", identifier: "OPS-1", title: "Ops low", priority: 4, team: "OPS" },
       { id: "ops-2", identifier: "OPS-2", title: "Ops none", priority: 0, team: "OPS" },
     ]);
-    expect(seen).toEqual([["web-1", "ops-1", "web-2"]]);
+    expect(order).toEqual(["WEB-1", "OPS-1", "WEB-2", "OPS-2"]);
+  });
+
+  test("launches every matching issue in one poll when no cap is set", async () => {
+    const { t3, dir, env, files } = await servers({}, {}, [
+      ...issues,
+      { id: "issue-3", identifier: "ENG-3", title: "Third" },
+      { id: "issue-4", identifier: "ENG-4", title: "Fourth" },
+      { id: "issue-5", identifier: "ENG-5", title: "Fifth" },
+      { id: "issue-6", identifier: "ENG-6", title: "Sixth" },
+    ]);
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches).toHaveLength(6);
+    expect(launchedIds(files.state)).toHaveLength(6);
+  });
+
+  test("threads start in T3's default interaction mode", async () => {
+    const { t3, dir, env } = await servers();
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches.map((launch) => launch.interactionMode)).toEqual(["default", "default"]);
+  });
+
+  test("the Linear comment links the thread under t3.url", async () => {
+    const { linear, t3, dir, env } = await servers(
+      {},
+      {
+        defaults: {
+          model: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+          linear: { onLaunch: { comment: true } },
+        },
+      },
+    );
+    const t3Home = mkdtempSync(join(tmpdir(), "linear-t3-t3home-"));
+    writeFile(join(t3Home, "userdata", "environment-id"), "env-1\n");
+    const result = await startCli({ cwd: dir, env: { ...env, T3CODE_HOME: t3Home } }, [
+      "run",
+      "--once",
+    ]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(linear.comments.map((c) => c.body)).toEqual(
+      t3.launches.map(
+        (launch) =>
+          `Started a T3 Code thread for this issue: ${t3.url}/env-1/${String(launch.threadId)}`,
+      ),
+    );
+  });
+
+  test("without T3's environment id on this machine, the Linear comment names the thread", async () => {
+    const { linear, t3, dir, env } = await servers(
+      {},
+      {
+        defaults: {
+          model: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+          linear: { onLaunch: { comment: true } },
+        },
+      },
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(linear.comments.map((c) => c.body)).toEqual(
+      t3.launches.map(
+        (launch) => `Started a T3 Code thread for this issue: \`${String(launch.threadId)}\``,
+      ),
+    );
   });
 
   test("SIGTERM during a launch lets it finish and record, then exits 0 without starting more", async () => {
@@ -675,16 +735,6 @@ describe("cli run against fake Linear and T3", () => {
       expect(result.stdout).toContain("ENG-3 would wait (global 2/2)");
       expect(t3.launches).toEqual([]);
       expect(existsSync(files.state)).toBe(false);
-    });
-
-    test("--dry-run counts maxLaunchesPerPoll as a cap", async () => {
-      const { t3, dir, env } = await servers({}, { maxLaunchesPerPoll: 1 });
-      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(result.stdout).toContain("T3 has 0 running");
-      expect(result.stdout).toContain("ENG-1 would start");
-      expect(result.stdout).toContain("ENG-2 would wait (maxLaunchesPerPoll 1/1)");
-      expect(t3.launches).toEqual([]);
     });
 
     test.each<{ case: string; thread: Omit<FakeThread, "id" | "projectId">; counts: boolean }>([
@@ -807,115 +857,26 @@ describe("cli run against fake Linear and T3", () => {
       expect(t3.launches).toHaveLength(1);
     });
 
-    test("recording a cut-off launch doesn't use up maxLaunchesPerPoll", async () => {
-      const { t3, dir, env, files } = await cutOffFirstLaunch({ maxLaunchesPerPoll: 1 });
-      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(launchedIds(files.state)).toEqual(["issue-1", "issue-2"]);
-      expect(t3.launches).toHaveLength(3);
-    });
-
     test.each([
-      { cap: undefined, launches: 2 },
+      { cap: undefined, launches: 3 },
       { cap: 0, launches: 0 },
-    ])(
-      "with the cap at $cap, starts $launches of 3 under maxLaunchesPerPoll 2",
-      async ({ cap, launches }) => {
-        const { t3, dir, env } = await servers(
-          { threads: [running] },
-          { maxRunningThreads: cap, maxLaunchesPerPoll: 2 },
-          threeIssues,
-        );
-        const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
-        expect(result).toMatchObject({ status: 0, stderr: "" });
-        expect(t3.launches).toHaveLength(launches);
-      },
-    );
-  });
-
-  describe("per-project maxRunningThreads", () => {
-    const infra = { id: "project-2", title: "infra", workspaceRoot: "/work/infra" };
-    const twoTeams: FakeIssue[] = [
-      { id: "issue-1", identifier: "ENG-1", title: "First", team: "ENG" },
-      { id: "issue-2", identifier: "ENG-2", title: "Second", team: "ENG" },
-      { id: "issue-3", identifier: "ENG-3", title: "Third", team: "ENG" },
-      { id: "ops-1", identifier: "OPS-1", title: "Ops first", team: "OPS" },
-      { id: "ops-2", identifier: "OPS-2", title: "Ops second", team: "OPS" },
-    ];
-    // Started by hand in a project.
-    const manual = (projectId: string, id = `t-manual-${projectId}`): FakeThread => ({
-      id,
-      projectId,
-      activityRunStatus: "running",
-    });
-
-    /** Projects "my-app" (ENG) and "infra" (OPS), with `defaults.maxRunningThreads` 2. */
-    async function twoProjects(threads: FakeThread[], caps: { global?: number; infra?: number }) {
-      return servers(
-        { projects: [project, infra], threads },
-        {
-          maxRunningThreads: caps.global,
-          defaults: {
-            model: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
-            linear: { onLaunch: { comment: false } },
-            maxRunningThreads: 2,
-          },
-          projects: {
-            "my-app": { linear: { team: "ENG" } },
-            infra: { linear: { team: "OPS" }, maxRunningThreads: caps.infra },
-          },
-        },
-        twoTeams,
+    ])("with the cap at $cap, starts $launches of 3", async ({ cap, launches }) => {
+      const { t3, dir, env } = await servers(
+        { threads: [running] },
+        { maxRunningThreads: cap },
+        threeIssues,
       );
-    }
-
-    const launchedIn = (launches: Record<string, unknown>[], projectId: string) =>
-      launches.filter((l) => l.projectId === projectId).length;
-
-    test("a full project waits while the other launches up to its own cap", async () => {
-      const { t3, dir, env } = await twoProjects([manual(infra.id)], { global: 4, infra: 1 });
       const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
       expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(launchedIn(t3.launches, project.id)).toBe(2);
-      expect(launchedIn(t3.launches, infra.id)).toBe(0);
-      expect(result.stdout).toContain('OPS-1 waiting: project "infra" has 1/1 running');
-      expect(result.stdout).toContain('OPS-2 waiting: project "infra" has 1/1 running');
-      expect(result.stdout).toContain('ENG-3 waiting: project "my-app" has 2/2 running');
-    });
-
-    test("manual Running threads count toward their project's cap", async () => {
-      const { t3, dir, env } = await twoProjects([manual(project.id)], {});
-      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(launchedIn(t3.launches, project.id)).toBe(1);
-      expect(launchedIn(t3.launches, infra.id)).toBe(2);
-      expect(result.stdout).toContain('ENG-2 waiting: project "my-app" has 2/2 running');
-    });
-
-    test("a project set to 0 launches nothing but logs its issues as waiting", async () => {
-      const { t3, dir, env } = await twoProjects([], { infra: 0 });
-      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(launchedIn(t3.launches, infra.id)).toBe(0);
-      expect(launchedIn(t3.launches, project.id)).toBe(2);
-      expect(result.stdout).toContain('OPS-1 waiting: project "infra" has 0/0 running');
-      expect(result.stdout).toContain('OPS-2 waiting: project "infra" has 0/0 running');
-    });
-
-    test("the global cap wins when the project caps add up to more", async () => {
-      const { t3, dir, env } = await twoProjects([], { global: 3 });
-      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      // Round-robin: ENG-1, OPS-1, ENG-2 fit; OPS-2 hits the global cap.
-      expect(t3.launches).toHaveLength(3);
-      expect(result.stdout).toContain("OPS-2 waiting: T3 has 3/3 running");
+      expect(t3.launches).toHaveLength(launches);
     });
 
     test("--dry-run reports a model-less project as failing without taking a slot", async () => {
+      const infra = { id: "project-2", title: "infra", workspaceRoot: "/work/infra" };
       const { t3, dir, env } = await servers(
         { projects: [project, infra] },
         {
-          maxLaunchesPerPoll: 1,
+          maxRunningThreads: 1,
           defaults: { linear: { onLaunch: { comment: false } } },
           projects: {
             "my-app": { linear: { team: "ENG" } },
@@ -925,40 +886,16 @@ describe("cli run against fake Linear and T3", () => {
             },
           },
         },
-        [twoTeams[0]!, twoTeams[3]!],
+        [
+          { id: "issue-1", identifier: "ENG-1", title: "First", team: "ENG" },
+          { id: "ops-1", identifier: "OPS-1", title: "Ops first", team: "OPS" },
+        ],
       );
       const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
       expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain("T3 has 0/1 running");
       expect(result.stdout).toContain('ENG-1 would fail: No model configured for project "my-app"');
       expect(result.stdout).toContain("OPS-1 would start");
-      expect(t3.launches).toEqual([]);
-    });
-
-    test("--dry-run reports a capped project T3 doesn't know, even with no matching issues", async () => {
-      const { dir, env } = await servers(
-        {},
-        {
-          projects: {
-            "my-app": { linear: { team: "ENG" } },
-            ghost: { linear: { team: "OPS" }, maxRunningThreads: 1 },
-          },
-        },
-      );
-      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(result.stdout).toContain('project "ghost": No T3 project matches "ghost"');
-    });
-
-    test("--dry-run marks a full project's issues as waiting on that project", async () => {
-      const { t3, dir, env } = await twoProjects([manual(infra.id)], { global: 4, infra: 1 });
-      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
-      expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(result.stdout).toContain("T3 has 1/4 running");
-      expect(result.stdout).toContain('project "my-app" has 0/2 running');
-      expect(result.stdout).toContain('project "infra" has 1/1 running');
-      expect(result.stdout).toContain('OPS-1 would wait (project "infra" 1/1)');
-      expect(result.stdout).toContain('OPS-2 would wait (project "infra" 1/1)');
-      expect(result.stdout).toContain('ENG-3 would wait (project "my-app" 2/2)');
       expect(t3.launches).toEqual([]);
     });
   });

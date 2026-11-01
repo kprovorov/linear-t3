@@ -35,12 +35,14 @@ async function listen(server: Server): Promise<string> {
 }
 
 /**
- * A Linear GraphQL API that answers the viewer query with a fixed user and every other query with
- * `issues`, keeping only those of the team the query filters on. With `apiKey` set, any other key
- * gets Linear's authentication error.
+ * A Linear GraphQL API that answers the viewer query with a fixed user, creates comments, and
+ * answers every other query with `issues`, keeping only those of the team the query filters on.
+ * With `apiKey` set, any other key gets Linear's authentication error.
  */
 export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: string } = {}) {
   const queries: string[] = [];
+  // The input of each comment created.
+  const comments: { id?: string; issueId?: string; body?: string }[] = [];
   // The API key each request was sent with.
   const apiKeys: (string | undefined)[] = [];
   const server = createServer(async (req, res) => {
@@ -60,6 +62,13 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
     if (/\bviewer\b/.test(query)) {
       const viewer = { id: "user-1", name: "Ada", email: "ada@example.com" };
       res.end(JSON.stringify({ data: { viewer } }));
+      return;
+    }
+    if (/\bcommentCreate\b/.test(query)) {
+      const { input } = variables as { input: (typeof comments)[number] };
+      comments.push(input);
+      const commentCreate = { success: true, lastSyncId: 0, comment: { id: input.id } };
+      res.end(JSON.stringify({ data: { commentCreate } }));
       return;
     }
     const team = filteredTeam(variables);
@@ -87,7 +96,7 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
     );
   });
   const url = await listen(server);
-  return { url: `${url}/graphql`, queries, apiKeys, close: () => server.close() };
+  return { url: `${url}/graphql`, queries, apiKeys, comments, close: () => server.close() };
 }
 
 // Just enough of RFC 6455 for one client: unfragmented text frames, client frames masked.

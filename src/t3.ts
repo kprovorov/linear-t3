@@ -66,7 +66,6 @@ export interface LaunchThreadInput {
   title: string;
   modelSelection: ModelSelection;
   runtimeMode: string;
-  interactionMode: string;
   workspaceStrategy: WorkspaceStrategy;
   message: string;
 }
@@ -308,7 +307,7 @@ export class T3Client {
       title: input.title,
       modelSelection: input.modelSelection,
       runtimeMode: input.runtimeMode,
-      interactionMode: input.interactionMode,
+      interactionMode: "default",
       workspaceStrategy: input.workspaceStrategy,
       initialMessage: {
         messageId: stableUuid(`${input.idempotencyKey}:message`),
