@@ -67,6 +67,14 @@ const TEAM_LABELS = `query TeamLabels($team: String!, $after: String) {
   }
 }`;
 
+// Deactivated users still hold issues, so they count.
+const USERS_BY_EMAIL = `query UsersByEmail($email: String!, $after: String) {
+  users(filter: { email: { eqIgnoreCase: $email } }, includeDisabled: true, first: 250, after: $after) {
+    nodes { id }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
 /**
  * Each of `names` as the team spells it, matched ignoring case. A name that matches nothing is an
  * error listing the valid names.
@@ -89,10 +97,11 @@ function resolveNames(
 }
 
 /**
- * The `IssueFilter` for a team's issues that are in any of `status` and carry all of `label`,
- * ANDed with `filter`. Status and label names are checked against the team first. The filter
- * names them rather than holding their ids, so a status or label deleted and made again still
- * matches.
+ * The `IssueFilter` for a team's issues that are in any of `status`, carry all of `label`, have
+ * `assignee` (`me`, `none` or an email) and are at `priority` or more urgent, ANDed with `filter`.
+ * Status and label names are checked against the team first, and an assignee email against the
+ * workspace's users. The filter names them rather than holding their ids, so a status or label
+ * deleted and made again still matches.
  */
 export async function teamIssueFilter(
   client: LinearClient,
@@ -100,20 +109,32 @@ export async function teamIssueFilter(
     team,
     status,
     label,
+    assignee,
+    priority,
     filter,
-  }: { team: string; status?: string[]; label?: string[]; filter?: Record<string, unknown> },
+  }: {
+    team: string;
+    status?: string[];
+    label?: string[];
+    assignee?: string;
+    priority?: number;
+    filter?: Record<string, unknown>;
+  },
   signal: AbortSignal,
 ): Promise<LinearDocument.IssueFilter> {
   const read = (field: string, query: string) =>
     readAll<{ name: string }>(client, field, query, { team }, signal).then((nodes) =>
       nodes.map((node) => node.name),
     );
-  const [statuses, labels] = await Promise.all([
+  const email = assignee !== "me" && assignee !== "none" ? assignee : undefined;
+  const [statuses, labels, users] = await Promise.all([
     status && read("workflowStates", TEAM_STATUSES),
     label && read("issueLabels", TEAM_LABELS),
+    email && readAll<{ id: string }>(client, "users", USERS_BY_EMAIL, { email }, signal),
   ]);
   // Every team has workflow statuses, so none means there's no such team.
   if (statuses?.length === 0) throw new Error(`No Linear team has the key "${team}"`);
+  if (users?.length === 0) throw new Error(`No Linear user has the email "${email}"`);
 
   const clauses: Record<string, unknown>[] = [{ team: { key: { eq: team } } }];
   if (status && statuses) {
@@ -125,6 +146,11 @@ export async function teamIssueFilter(
       clauses.push({ labels: { some: { name: { eqIgnoreCase: name } } } });
     }
   }
+  if (assignee === "me") clauses.push({ assignee: { isMe: { eq: true } } });
+  else if (assignee === "none") clauses.push({ assignee: { null: true } });
+  else if (assignee) clauses.push({ assignee: { email: { eqIgnoreCase: assignee } } });
+  // Linear's "No priority" is 0, so starting at 1 leaves it out.
+  if (priority) clauses.push({ priority: { gte: 1, lte: priority } });
   clauses.push(filter ?? {});
   return { and: clauses } as LinearDocument.IssueFilter;
 }
