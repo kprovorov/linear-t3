@@ -28,7 +28,7 @@ export interface FakeStatus {
   type: "triage" | "backlog" | "unstarted" | "started" | "completed" | "canceled";
 }
 
-/** The key of the one team the fake has statuses and labels for. */
+/** The key of the team the fake has statuses and labels for, unless told other teams. */
 export const FAKE_TEAM = "ENG";
 
 export const FAKE_STATUSES: FakeStatus[] = [
@@ -140,10 +140,10 @@ async function listen(server: Server): Promise<string> {
 }
 
 /**
- * A Linear GraphQL API for one team that answers the viewer query with a fixed user, creates
- * comments, lists the team's workflow statuses and labels, and answers every other query with the
- * `issues` that match its filter. With `apiKey` set, any other key gets Linear's authentication
- * error.
+ * A Linear GraphQL API for `teams`, which share `statuses` and `labels`. It answers the viewer
+ * query with a fixed user, creates comments, lists a team's workflow statuses and labels, moves
+ * issues to another status, and answers every other query with the `issues` that match its filter.
+ * With `apiKey` set, any other key gets Linear's authentication error.
  */
 export async function fakeLinear(
   issues: FakeIssue[],
@@ -152,12 +152,14 @@ export async function fakeLinear(
     statuses = FAKE_STATUSES,
     labels = [],
     users = [FAKE_VIEWER],
+    teams = [FAKE_TEAM],
   }: {
     apiKey?: string;
     statuses?: FakeStatus[];
     labels?: string[];
     /** The workspace's users, found by email. */
     users?: { id: string; email: string }[];
+    teams?: string[];
   } = {},
 ) {
   const queries: string[] = [];
@@ -167,6 +169,9 @@ export async function fakeLinear(
   const apiKeys: (string | undefined)[] = [];
   // The filter each issues query was sent with.
   const filters: unknown[] = [];
+  // Each issue moved to another status, by the status's name.
+  const moves: { id: string; status: string }[] = [];
+  const statusId = (name: string) => `state-${name}`;
   const server = createServer(async (req, res) => {
     const { query, variables } = JSON.parse(await readBody(req)) as {
       query: string;
@@ -202,13 +207,34 @@ export async function fakeLinear(
     }
     if (/\bworkflowStates\b/.test(query)) {
       const { team } = variables as { team?: string };
-      const nodes = team === FAKE_TEAM ? statuses : [];
+      const nodes = team && teams.includes(team) ? statuses : [];
       res.end(JSON.stringify({ data: { workflowStates: connection(nodes) } }));
+      return;
+    }
+    if (/\bissue\(/.test(query)) {
+      const { id } = variables as { id?: string };
+      const found = issues.find((issue) => issue.id === id);
+      const team = found && {
+        states: connection(statuses.map((s) => ({ id: statusId(s.name), name: s.name }))),
+      };
+      res.end(JSON.stringify({ data: { issue: found && { identifier: found.identifier, team } } }));
+      return;
+    }
+    if (/\bissueUpdate\b/.test(query)) {
+      const { id, stateId } = variables as { id: string; stateId: string };
+      const status = statuses.find((s) => statusId(s.name) === stateId);
+      if (!status || !issues.some((issue) => issue.id === id)) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ errors: [{ message: `No issue ${id} or status ${stateId}` }] }));
+        return;
+      }
+      moves.push({ id, status: status.name });
+      res.end(JSON.stringify({ data: { issueUpdate: { success: true } } }));
       return;
     }
     if (/\bissueLabels\b/.test(query)) {
       const { team } = variables as { team?: string };
-      const nodes = team === FAKE_TEAM ? labels.map((name) => ({ name })) : [];
+      const nodes = team && teams.includes(team) ? labels.map((name) => ({ name })) : [];
       res.end(JSON.stringify({ data: { issueLabels: connection(nodes) } }));
       return;
     }
@@ -256,6 +282,7 @@ export async function fakeLinear(
     apiKeys,
     comments,
     filters,
+    moves,
     close: () => server.close(),
   };
 }

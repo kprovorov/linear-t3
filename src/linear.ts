@@ -97,13 +97,14 @@ function resolveNames(
 }
 
 /**
- * The `IssueFilter` for a team's issues that are in any of `status`, carry all of `label`, have
- * `assignee` (`me`, `none` or an email) and are at `priority` or more urgent, ANDed with `filter`.
- * Status and label names are checked against the team first, and an assignee email against the
- * workspace's users. The filter names them rather than holding their ids, so a status or label
+ * Checks `config`'s status, label and setStatus names against the team, ignoring case, and an
+ * assignee email against the workspace's users, before the first poll. Returns `setStatus` as the
+ * team spells it, and the `IssueFilter` for the team's issues that are in any of `status`, carry
+ * all of `label`, have `assignee` (`me`, `none` or an email) and are at `priority` or more urgent,
+ * ANDed with `filter`. The filter names statuses and labels rather than holding their ids, so one
  * deleted and made again still matches.
  */
-export async function teamIssueFilter(
+export async function checkTeam(
   client: LinearClient,
   {
     team,
@@ -112,6 +113,7 @@ export async function teamIssueFilter(
     assignee,
     priority,
     filter,
+    setStatus,
   }: {
     team: string;
     status?: string[];
@@ -119,27 +121,28 @@ export async function teamIssueFilter(
     assignee?: string;
     priority?: number;
     filter?: Record<string, unknown>;
+    setStatus: string | false;
   },
   signal: AbortSignal,
-): Promise<LinearDocument.IssueFilter> {
+): Promise<{ filter: LinearDocument.IssueFilter; setStatus: string | false }> {
   const read = (field: string, query: string) =>
     readAll<{ name: string }>(client, field, query, { team }, signal).then((nodes) =>
       nodes.map((node) => node.name),
     );
   const email = assignee !== "me" && assignee !== "none" ? assignee : undefined;
   const [statuses, labels, users] = await Promise.all([
-    status && read("workflowStates", TEAM_STATUSES),
+    status !== undefined || setStatus !== false ? read("workflowStates", TEAM_STATUSES) : undefined,
     label && read("issueLabels", TEAM_LABELS),
     email && readAll<{ id: string }>(client, "users", USERS_BY_EMAIL, { email }, signal),
   ]);
   // Every team has workflow statuses, so none means there's no such team.
   if (statuses?.length === 0) throw new Error(`No Linear team has the key "${team}"`);
   if (users?.length === 0) throw new Error(`No Linear user has the email "${email}"`);
+  const statusNames = { one: "status", many: "statuses", team };
 
   const clauses: Record<string, unknown>[] = [{ team: { key: { eq: team } } }];
   if (status && statuses) {
-    const names = resolveNames(status, statuses, { one: "status", many: "statuses", team });
-    clauses.push({ state: { name: { in: names } } });
+    clauses.push({ state: { name: { in: resolveNames(status, statuses, statusNames) } } });
   }
   if (label && labels) {
     for (const name of resolveNames(label, labels, { one: "label", many: "labels", team })) {
@@ -152,7 +155,18 @@ export async function teamIssueFilter(
   // Linear's "No priority" is 0, so starting at 1 leaves it out.
   if (priority) clauses.push({ priority: { gte: 1, lte: priority } });
   clauses.push(filter ?? {});
-  return { and: clauses } as LinearDocument.IssueFilter;
+
+  let resolvedSetStatus: string | false = false;
+  if (setStatus && statuses) {
+    try {
+      [resolvedSetStatus] = resolveNames([setStatus], statuses, statusNames);
+    } catch (error) {
+      throw new Error(
+        `${(error as Error).message}. Pick the status to move launched issues to with --set-status <name>, or leave it alone with --set-status false`,
+      );
+    }
+  }
+  return { filter: { and: clauses } as LinearDocument.IssueFilter, setStatus: resolvedSetStatus };
 }
 
 export async function listIssues(
@@ -192,32 +206,44 @@ export async function createCommentOnce(
   }
 }
 
-const stateIdsByTeam = new Map<string, Map<string, string>>();
+const ISSUE_TEAM_STATUSES = `query IssueTeamStatuses($id: String!) {
+  issue(id: $id) {
+    identifier
+    team { states(first: 250) { nodes { id name } } }
+  }
+}`;
 
+const MOVE_ISSUE = `mutation MoveIssue($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) { success }
+}`;
+
+/**
+ * Moves an issue to the workflow status of its team named `statusName`, matched ignoring case. The
+ * team's statuses are read each time, so a status renamed since the launch is reported, not
+ * guessed.
+ */
 export async function moveToState(
   client: LinearClient,
-  issue: Issue,
-  stateName: string,
+  issueId: string,
+  statusName: string,
 ): Promise<void> {
-  const teamId = issue.teamId;
-  if (!teamId) throw new Error(`Issue ${issue.identifier} has no team`);
-  let states = stateIdsByTeam.get(teamId);
-  if (!states) {
-    const { nodes } = await (await client.team(teamId)).states();
-    states = new Map(nodes.map((s) => [s.name.toLowerCase(), s.id]));
-    stateIdsByTeam.set(teamId, states);
-  }
-  try {
-    const stateId = states.get(stateName.toLowerCase());
-    if (!stateId)
-      throw new Error(
-        `Issue ${issue.identifier}'s team has no workflow state named "${stateName}"`,
-      );
-    const { success } = await client.updateIssue(issue.id, { stateId });
-    if (!success) throw new Error(`Linear did not apply the state change for ${issue.identifier}`);
-  } catch (error) {
-    // The team's workflow may have changed; refetch its states on the next attempt.
-    stateIdsByTeam.delete(teamId);
-    throw error;
+  type Statuses = {
+    issue: { identifier: string; team: { states: { nodes: { id: string; name: string }[] } } };
+  };
+  const { data } = await client.client.rawRequest<Statuses, { id: string }>(ISSUE_TEAM_STATUSES, {
+    id: issueId,
+  });
+  if (!data?.issue) throw new Error(`Linear has no issue ${issueId}`);
+  const { identifier, team } = data.issue;
+  const wanted = statusName.toLowerCase();
+  const stateId = team.states.nodes.find((s) => s.name.toLowerCase() === wanted)?.id;
+  if (!stateId)
+    throw new Error(`${identifier}'s team has no workflow status named "${statusName}"`);
+  const response = await client.client.rawRequest<
+    { issueUpdate: { success: boolean } },
+    { id: string; stateId: string }
+  >(MOVE_ISSUE, { id: issueId, stateId });
+  if (!response.data?.issueUpdate.success) {
+    throw new Error(`Linear did not apply the status change for ${identifier}`);
   }
 }

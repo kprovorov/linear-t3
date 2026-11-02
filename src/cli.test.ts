@@ -218,7 +218,7 @@ describe("cli", () => {
       ["--assignee <assignee>", "default: anyone", "local"],
       ["--priority <priority>", "default: any priority", "local"],
       ["--filter <json>", "default: none", "local"],
-      ["--set-status <status>", "default: leave the status as it is", "local"],
+      ["--set-status <status|false>", "default: In Progress", "local"],
       ["--comment [true|false]", "default: true", "all"],
       ["--model <model>", "default: the T3 project's default model", "all"],
       [
@@ -270,6 +270,7 @@ describe("cli", () => {
     { args: ["--poll-interval", "soon"], error: "--poll-interval" },
     { args: ["--poll-interval", "5"], error: "--poll-interval" },
     { args: ["--workspace", "root"], error: "--workspace" },
+    { args: ["--set-status", ""], error: "--set-status" },
   ])("run $args exits non-zero naming $error", ({ args, error }) => {
     const env = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
     const result = runCliIn({ cwd: repoDir(), env }, "run", "--once", ...args);
@@ -385,6 +386,14 @@ describe("cli run", () => {
       errors: (f) => [
         `Invalid config ${f.global}:`,
         "team: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
+      ],
+    },
+    {
+      case: "setStatus in the Global Config",
+      global: { setStatus: "In Review" },
+      errors: (f) => [
+        `Invalid config ${f.global}:`,
+        "setStatus: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
       ],
     },
     {
@@ -852,6 +861,10 @@ describe("cli run against fake Linear and T3", () => {
         args: ["--team", "OPS", "--status", "Todo"],
         error: 'No Linear team has the key "OPS"',
       },
+      {
+        args: ["--team", "OPS"],
+        error: 'No Linear team has the key "OPS"',
+      },
     ])(
       "$args exits non-zero before the first poll, listing the valid names",
       async ({ args, error }) => {
@@ -950,12 +963,135 @@ describe("cli run against fake Linear and T3", () => {
     );
   });
 
+  describe("setStatus", () => {
+    const statuses = [
+      { name: "Todo", type: "unstarted" },
+      { name: "In Progress", type: "started" },
+      { name: "In Review", type: "started" },
+    ] as const;
+
+    test("with no setStatus, launched issues move to the team's In Progress status", async () => {
+      const { linear, dir, env, files } = await servers();
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(linear.moves).toEqual([
+        { id: "issue-1", status: "In Progress" },
+        { id: "issue-2", status: "In Progress" },
+      ]);
+      const { launched } = JSON.parse(readFileSync(files.state, "utf8"));
+      expect(launched["issue-1"].pendingActions ?? {}).toEqual({});
+    });
+
+    test.each([["in review"], ["IN REVIEW"]])(
+      "--set-status %s moves launched issues to the matching status",
+      async (name) => {
+        const { linear, dir, env } = await servers({}, {}, issues, {}, { statuses: [...statuses] });
+        const result = await startCli({ cwd: dir, env }, ["run", "--once", "--set-status", name])
+          .result;
+        expect(result).toMatchObject({ status: 0, stderr: "" });
+        expect(linear.moves).toEqual([
+          { id: "issue-1", status: "In Review" },
+          { id: "issue-2", status: "In Review" },
+        ]);
+      },
+    );
+
+    test("setStatus in the Local Config moves launched issues to that status", async () => {
+      const local = { setStatus: "In Review" };
+      const { linear, dir, env } = await servers({}, {}, issues, local, {
+        statuses: [...statuses],
+      });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(linear.moves.map((move) => move.status)).toEqual(["In Review", "In Review"]);
+    });
+
+    test.each<{ case: string; args: string[]; local: Record<string, unknown> }>([
+      { case: "--set-status false", args: ["--set-status", "false"], local: {} },
+      { case: "setStatus false in the Local Config", args: [], local: { setStatus: false } },
+      {
+        case: "--set-status false over the Local Config's setStatus",
+        args: ["--set-status", "false"],
+        local: { setStatus: "In Review" },
+      },
+    ])("$case leaves the issues' status alone", async ({ args, local }) => {
+      const { linear, t3, dir, env, files } = await servers({}, {}, issues, local);
+      const result = await startCli({ cwd: dir, env }, ["run", "--once", ...args]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches).toHaveLength(2);
+      expect(linear.moves).toEqual([]);
+      expect(linear.queries.some((q) => q.includes("workflowStates"))).toBe(false);
+      expect(launchedIds(files.state)).toEqual(["issue-1", "issue-2"]);
+    });
+
+    test.each<{ case: string; args: string[]; error: string }>([
+      {
+        case: "a team with no In Progress and no setStatus",
+        args: [],
+        error:
+          'Team ENG has no status named "In Progress". Valid statuses: Done, Todo. Pick the status to move launched issues to with --set-status <name>, or leave it alone with --set-status false',
+      },
+      {
+        case: "an unknown --set-status",
+        args: ["--set-status", "Review"],
+        error: 'Team ENG has no status named "Review". Valid statuses: Done, Todo. Pick the status',
+      },
+    ])(
+      "$case exits non-zero before the first poll, with the suggestion",
+      async ({ args, error }) => {
+        const noInProgress = [
+          { name: "Todo", type: "unstarted" },
+          { name: "Done", type: "completed" },
+        ] as const;
+        const { linear, t3, dir, env } = await servers(
+          {},
+          {},
+          issues,
+          {},
+          {
+            statuses: [...noInProgress],
+          },
+        );
+        const result = await startCli({ cwd: dir, env }, ["run", "--once", ...args]).result;
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(error);
+        expect(linear.filters).toEqual([]);
+        expect(t3.launches).toEqual([]);
+      },
+    );
+
+    test("a failed status move is recorded in State and retried on the next poll", async () => {
+      const { linear, dir, env, files } = await servers();
+      const launched = {
+        "issue-1": {
+          identifier: "ENG-1",
+          threadId: "t-1",
+          launchedAt: "2026-01-01T00:00:00.000Z",
+          pendingActions: { moveToState: "in progress" },
+        },
+      };
+      writeFile(files.state, JSON.stringify({ launched }));
+      const result = await startCli({ cwd: dir, env }, ["run", "--once", "--set-status", "false"])
+        .result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(linear.moves).toEqual([{ id: "issue-1", status: "In Progress" }]);
+      const state = JSON.parse(readFileSync(files.state, "utf8"));
+      expect(state.launched["issue-1"].pendingActions ?? {}).toEqual({});
+    });
+  });
+
   test("with only flags and no Local Config, polls the given team and launches into the given project", async () => {
     const other = { id: "project-0", title: "other", workspaceRoot: "/work/other" };
-    const { linear, t3, dir, env, files } = await servers({ projects: [other, project] }, {}, [
-      ...issues.map((issue) => ({ ...issue, team: "ENG" })),
-      { id: "ops-1", identifier: "OPS-1", title: "Ops", team: "OPS" },
-    ]);
+    const { linear, t3, dir, env, files } = await servers(
+      { projects: [other, project] },
+      {},
+      [
+        ...issues.map((issue) => ({ ...issue, team: "ENG" })),
+        { id: "ops-1", identifier: "OPS-1", title: "Ops", team: "OPS" },
+      ],
+      {},
+      { teams: ["ENG", "OPS"] },
+    );
     rmSync(join(dir, LOCAL));
     // `t3Url` is a machine setting with no flag, so the Global Config holds only that.
     writeFile(files.config, JSON.stringify({ t3Url: t3.url }));
@@ -2353,7 +2489,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
    * shows `printed` once it is set, else fails the way it does for an agent that isn't loaded.
    */
   async function service() {
-    const linear = await fakeLinear([], { apiKey: "lin-key" });
+    const linear = await fakeLinear([], { apiKey: "lin-key", teams: ["ENG", "OPS"] });
     const dir = repoDir();
     const projects = [{ id: "project-1", title: "my-app", workspaceRoot: dir }];
     const t3 = await fakeT3({ projects, token: "t3-tok" });
@@ -2684,7 +2820,7 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
    * says whether lingering is on.
    */
   async function service() {
-    const linear = await fakeLinear([], { apiKey: "lin-key" });
+    const linear = await fakeLinear([], { apiKey: "lin-key", teams: ["ENG", "OPS"] });
     const dir = repoDir();
     const projects = [{ id: "project-1", title: "my-app", workspaceRoot: dir }];
     const t3 = await fakeT3({ projects, token: "t3-tok" });

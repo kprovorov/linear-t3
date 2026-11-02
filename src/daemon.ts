@@ -9,7 +9,7 @@ import {
   createLinearClient,
   listIssues,
   moveToState,
-  teamIssueFilter,
+  checkTeam,
   type Issue,
   type LinearClient,
   type LinearDocument,
@@ -241,15 +241,17 @@ const needsT3Settings = (config: Config) =>
  * Before the first poll: the T3 project this run watches, `config` with `runtimeMode`,
  * `workspace` and `startFromOrigin` filled in from T3's settings where no layer set them, `model`
  * and `provider` resolved through T3's model catalog and `baseRef` set, as configured or else the
- * project's default branch, and the issue filter, with its status and label names checked against
- * the team. Worktrees need `baseRef`; `workspace: local` creates none, so it isn't looked up.
+ * project's default branch, and the issue filter, with its status, label and setStatus names
+ * checked against the team. Worktrees need `baseRef`; `workspace: local` creates none, so it isn't looked up.
  */
 async function prepare(
   loaded: Config,
   t3Token: string,
   linear: LinearClient,
 ): Promise<{ config: Config; project: T3Project; filter: IssueFilter }> {
-  const filter = await teamIssueFilter(linear, loaded, shutdown.signal);
+  const team = await checkTeam(linear, loaded, shutdown.signal);
+  const filter = team.filter;
+  loaded = { ...loaded, setStatus: team.setStatus };
   const t3 = await T3Client.connect(loaded.t3Url, t3Token, shutdown.signal);
   // Shutdown ends the wait for T3 by closing the socket.
   const closeOnShutdown = () => t3.close();
@@ -413,7 +415,7 @@ async function launchIssue(
   log(
     `${issue.identifier}: ${resumed ? "found existing" : "started"} T3 thread ${threadId} in "${project.title}"`,
   );
-  await runPendingActions(issue.id, record, { config, linear, state }, issue);
+  await runPendingActions(issue.id, record, { config, linear, state });
 }
 
 /** Applies a launched issue's outstanding Linear updates, keeping any that fail for the next poll. */
@@ -421,7 +423,6 @@ async function runPendingActions(
   issueId: string,
   record: LaunchRecord,
   ctx: { config: Config; linear: LinearClient; state: StateStore },
-  issue?: Issue,
 ): Promise<void> {
   const { config, linear, state } = ctx;
   const pendingActions = { ...record.pendingActions };
@@ -439,7 +440,7 @@ async function runPendingActions(
   }
   if (pendingActions.moveToState) {
     try {
-      await moveToState(linear, issue ?? (await linear.issue(issueId)), pendingActions.moveToState);
+      await moveToState(linear, issueId, pendingActions.moveToState);
       delete pendingActions.moveToState;
     } catch (error) {
       log(
