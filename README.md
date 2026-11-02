@@ -69,7 +69,7 @@ Besides a flag for every [Config key](#config-keys), `run` takes:
 | `--config <path>` | Uses this Local Config instead of the nearest `linear-t3.config.json`. The file must exist.                                                  |
 | `--no-config`     | Uses no Local Config, even if the repository has one.                                                                                        |
 
-`--once` and `--dry-run` exit 1 on a validation, API or launch failure, or when a requested Linear update fails. They exit 0 otherwise, including when nothing matches or the cap is full, so a script can tell a failure from an empty queue.
+`--once` and `--dry-run` exit 1 when a check before the first poll fails, or when the poll itself fails, for example because Linear or T3 can't be reached. They exit 0 otherwise, including when nothing matches or the cap is full. A failed launch, comment or status move for one issue is logged and retried on a later poll; it doesn't change the exit code, so check the output for `failed`.
 
 `--dry-run` needs both tokens, because it reads T3 to count Running threads. It prints how many threads are Running in T3 against `maxRunningThreads`, then lists the matching issues in launch order, each marked `would start` or `would wait`, for example `FIT-2 would wait (global 2/2)`.
 
