@@ -345,7 +345,36 @@ export interface FakeT3Options {
    * `null`: a T3 without `server.getConfig`.
    */
   providers?: FakeProvider[] | null;
+  /**
+   * The `settings` `server.getConfig` reports, merged over T3's own defaults (`DEFAULT_SETTINGS`).
+   * T3 leaves `defaultThreadEnvMode` out when it's unset.
+   */
+  settings?: FakeSettings;
+  /** The files `projects.readFile` finds, by absolute path. */
+  files?: Record<string, string>;
 }
+
+/** The T3 settings that pick how threads start, with the per-project overrides. */
+export interface FakeSettings {
+  defaultRuntimeMode?: string;
+  defaultThreadEnvMode?: "local" | "worktree";
+  newWorktreesStartFromOrigin?: boolean;
+  projectSettingsOverrides?: Record<
+    string,
+    {
+      defaultRuntimeMode?: string;
+      defaultThreadEnvMode?: "local" | "worktree";
+      newWorktreesStartFromOrigin?: boolean;
+    }
+  >;
+}
+
+/** What T3 0.1.6 reports when the user changed none of these settings. */
+export const DEFAULT_SETTINGS: FakeSettings = {
+  defaultRuntimeMode: "full-access",
+  newWorktreesStartFromOrigin: true,
+  projectSettingsOverrides: {},
+};
 
 export interface FakeModel {
   slug: string;
@@ -394,6 +423,8 @@ export async function fakeT3({
   onLaunch,
   refPages = [[{ name: "main", isDefault: true }]],
   providers = DEFAULT_PROVIDERS,
+  settings = {},
+  files = {},
 }: FakeT3Options) {
   const requests: string[] = [];
   // Every RPC received, in order.
@@ -481,6 +512,16 @@ export async function fakeT3({
             nextCursor: cursor + 1 < refPages.length ? cursor + 1 : null,
             totalCount: refPages.flat().length,
           });
+        } else if (message.tag === "projects.readFile") {
+          const { cwd, relativePath } = message.payload as { cwd: string; relativePath: string };
+          const contents = files[`${cwd}/${relativePath}`];
+          exit(message.id, {
+            relativePath,
+            contents: contents ?? "",
+            byteLength: Buffer.byteLength(contents ?? ""),
+            truncated: false,
+            exists: contents !== undefined,
+          });
         } else if (message.tag === "server.getConfig" && providers) {
           exit(message.id, {
             providers: providers.map(({ instanceId, displayName, enabled = true, models }) => ({
@@ -491,7 +532,7 @@ export async function fakeT3({
               status: enabled ? "ready" : "disabled",
               models: models.map((model) => ({ isCustom: false, capabilities: {}, ...model })),
             })),
-            settings: {},
+            settings: { ...DEFAULT_SETTINGS, ...settings },
           });
         } else {
           // What T3 0.1.6 answers to a request tag it doesn't have.
