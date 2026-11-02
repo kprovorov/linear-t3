@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { Paths } from "./paths.ts";
 import { launchd } from "./launchd.ts";
@@ -56,12 +57,25 @@ export function serviceManager(paths: Paths): ServiceManager {
 // The Daemon reads these to find its files, so the service gets them when `start` had them.
 const PASSED_ENV = ["T3CODE_HOME", "LINEAR_T3_CONFIG", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
 
-/** The unit that runs `cliPath run` for the Config in `paths` with the current `node`. */
-export function daemonUnit(paths: Paths, cliPath: string, env = process.env): Unit {
+/**
+ * The unit that runs `cliPath run` with the current `node`, pinned to `localConfig` when there is
+ * one. The Global Config is found again from the passed environment.
+ */
+export function daemonUnit(cliPath: string, localConfig?: string, env = process.env): Unit {
   return {
-    program: [process.execPath, cliPath, "run", "--config", paths.config],
+    program: [
+      process.execPath,
+      cliPath,
+      "run",
+      ...(localConfig === undefined ? [] : ["--config", localConfig]),
+    ],
     env: Object.fromEntries(
-      PASSED_ENV.flatMap((key) => (env[key] ? [[key, env[key]] as const] : [])),
+      PASSED_ENV.flatMap((key) => {
+        const value = env[key];
+        if (!value) return [];
+        // The service runs from another directory, so a relative Global Config must be made absolute.
+        return [[key, key === "LINEAR_T3_CONFIG" ? resolve(value) : value] as const];
+      }),
     ),
   };
 }

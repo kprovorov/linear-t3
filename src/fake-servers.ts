@@ -45,6 +45,8 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
   const comments: { id?: string; issueId?: string; body?: string }[] = [];
   // The API key each request was sent with.
   const apiKeys: (string | undefined)[] = [];
+  // The filter each issues query was sent with.
+  const filters: unknown[] = [];
   const server = createServer(async (req, res) => {
     const { query, variables } = JSON.parse(await readBody(req)) as {
       query: string;
@@ -71,6 +73,7 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
       res.end(JSON.stringify({ data: { commentCreate } }));
       return;
     }
+    filters.push((variables as { filter?: unknown } | undefined)?.filter);
     const team = filteredTeam(variables);
     const matching = issues.filter((issue) => issue.team === undefined || issue.team === team);
     const nodes = matching.map((issue) => ({
@@ -96,7 +99,14 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
     );
   });
   const url = await listen(server);
-  return { url: `${url}/graphql`, queries, apiKeys, comments, close: () => server.close() };
+  return {
+    url: `${url}/graphql`,
+    queries,
+    apiKeys,
+    comments,
+    filters,
+    close: () => server.close(),
+  };
 }
 
 // Just enough of RFC 6455 for one client: unfragmented text frames, client frames masked.
@@ -158,7 +168,13 @@ export interface FakeThread {
 }
 
 export interface FakeT3Options {
-  projects: { id: string; title: string; workspaceRoot: string }[];
+  /** Read at each snapshot, so a test can add projects once it knows their folders. */
+  projects: {
+    id: string;
+    title: string;
+    workspaceRoot: string;
+    defaultModelSelection?: { instanceId: string; model: string; options?: unknown };
+  }[];
   /**
    * The snapshot's threads, read at each snapshot so a test can change them between polls. A
    * launch adds its thread here as running, as T3 does once it creates the thread.

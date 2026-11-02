@@ -77,15 +77,15 @@ describe("t3BaseUrl", () => {
     return path;
   };
 
-  test("uses t3.url from the config file", async () => {
-    const path = configFile(JSON.stringify({ t3: { url: "http://10.0.0.5:4000" } }));
+  test("uses t3Url from the config file", async () => {
+    const path = configFile(JSON.stringify({ t3Url: "http://10.0.0.5:4000" }));
     expect(await t3BaseUrl(path)).toBe("http://10.0.0.5:4000");
   });
 
   test.each([
     { case: "the file is missing", contents: undefined },
-    { case: "the config has no t3 section", contents: JSON.stringify({ projects: {} }) },
-    { case: "t3.url is not a string", contents: JSON.stringify({ t3: { url: 3773 } }) },
+    { case: "the config has no t3Url", contents: JSON.stringify({ maxRunningThreads: 2 }) },
+    { case: "t3Url is not a string", contents: JSON.stringify({ t3Url: 3773 }) },
     { case: "the file is not valid JSON", contents: "{ nope" },
   ])("falls back to the default when $case", async ({ contents }) => {
     expect(await t3BaseUrl(configFile(contents))).toBe(DEFAULT_T3_URL);

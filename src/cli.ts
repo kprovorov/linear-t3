@@ -16,8 +16,8 @@ import {
 import { t3BaseUrl, t3Integration } from "./connect-t3.ts";
 import { runDaemon } from "./daemon.ts";
 import { EnvFile } from "./env-file.ts";
-import { loadConfig } from "./config.ts";
-import { resolvePaths, resolveStateFile } from "./paths.ts";
+import { LOCAL_CONFIG_NAME, loadGlobalConfig } from "./config.ts";
+import { resolvePaths } from "./paths.ts";
 import { preflight } from "./preflight.ts";
 import { ServiceError, daemonUnit, serviceManager } from "./service.ts";
 import { checkLinear } from "./token-check.ts";
@@ -40,11 +40,11 @@ const linear: Integration = {
     step === "existing" && result.status === "unreachable" ? "abort" : "obtain",
 };
 
-const paths = () => resolvePaths(program.opts<{ config?: string }>().config);
+const paths = () => resolvePaths();
 
 /** Every integration `connect` knows about, in the order plain `connect` runs them. */
 const integrations = {
-  t3: async () => t3Integration({ baseUrl: await t3BaseUrl(paths().config) }),
+  t3: async () => t3Integration({ baseUrl: await t3BaseUrl(paths().globalConfig) }),
   linear: async () => linear,
 } satisfies Record<string, () => Promise<Integration | PendingIntegration>>;
 
@@ -118,7 +118,7 @@ async function runConnect(integration: IntegrationName | undefined): Promise<voi
 const configTemplate = new URL("../config.template.json", import.meta.url);
 
 function runSetup(): void {
-  const { config } = paths();
+  const { globalConfig: config } = paths();
   mkdirSync(dirname(config), { recursive: true });
   try {
     // `wx` fails if the file exists, so an existing Config is never touched.
@@ -130,21 +130,31 @@ function runSetup(): void {
   }
   console.log(
     [
-      `Wrote a starter Config to ${config}`,
+      `Wrote a starter Global Config to ${config}`,
       "",
       "Next steps:",
-      "  1. Edit its projects: your T3 projects, their Linear teams and filters",
+      `  1. Add a ${LOCAL_CONFIG_NAME} to your repository, with the T3 project and Linear team:`,
+      '     { "project": "/path/to/repo", "team": "ENG" }',
       "  2. Run `linear-t3 connect` to save the T3 and Linear tokens",
-      "  3. Run `linear-t3 start` to run the Daemon in the background",
+      "  3. Run `linear-t3 run` in the repository, or `linear-t3 start` to run it in the background",
     ].join("\n"),
   );
 }
 
-async function runDaemonCommand({ once = false, dryRun = false }): Promise<void> {
+async function runDaemonCommand({
+  once = false,
+  dryRun = false,
+  config,
+}: {
+  once?: boolean;
+  dryRun?: boolean;
+  config?: string;
+}): Promise<void> {
   try {
     // A dry run only reports, so polling again would just report the same again.
     await runDaemon({
       paths: paths(),
+      localConfig: config,
       once: once || dryRun,
       dryRun,
     });
@@ -167,7 +177,7 @@ async function exitOnServiceError(work: () => Promise<void>): Promise<void> {
 
 const cliPath = fileURLToPath(import.meta.url);
 
-async function start(): Promise<void> {
+async function start({ config }: { config?: string }): Promise<void> {
   const where = paths();
   const manager = serviceManager(where);
   // npm can clean the npx cache at any time, which would leave the service pointing at nothing.
@@ -176,13 +186,13 @@ async function start(): Promise<void> {
       "linear-t3 is running from the npx cache, which npm may clean up. Install it first with `npm i -g linear-t3`, then run `linear-t3 start`",
     );
   }
-  const problems = await preflight(where);
+  const { problems, localConfig } = await preflight(where, config);
   if (problems.length > 0) {
     throw new ServiceError(
       ["The Daemon would not start, so it wasn't installed:", ...problems].join("\n"),
     );
   }
-  await manager.install(daemonUnit(where, cliPath));
+  await manager.install(daemonUnit(cliPath, localConfig));
   console.log(`Started the Daemon (${manager.kind} ${manager.unitPath})`);
 }
 
@@ -231,14 +241,14 @@ async function status(): Promise<void> {
     }
   }
   // An unreadable Config can't say where State is, so show where it would be by default.
-  const state = await loadConfig(where.config).then(
-    (config) => resolveStateFile(where, config.stateFile),
+  const state = await loadGlobalConfig(where.globalConfig).then(
+    (config) => config.stateFile ?? where.defaultState,
     () => where.defaultState,
   );
   console.log(
     [
       `Daemon:      ${daemon}`,
-      `Config:      ${where.config}`,
+      `Config:      ${where.globalConfig}`,
       `Credentials: ${where.credentials}`,
       `State:       ${state}`,
       `Log:         ${manager.logLocation}`,
@@ -252,19 +262,18 @@ async function logs({ follow = false }): Promise<void> {
   process.exitCode = await installedService().logs(follow);
 }
 
-const program = new Command("linear-t3")
-  .version(pkg.version)
-  .option(
-    "--config <path>",
-    "the Config file (default: $LINEAR_T3_CONFIG or $XDG_CONFIG_HOME/linear-t3/config.json)",
-  )
-  // Subcommand help lists --config too; set before adding commands so they inherit it.
-  .configureHelp({ showGlobalOptions: true })
-  .action(() => program.help());
+const program = new Command("linear-t3").version(pkg.version).action(() => program.help());
+
+const CONFIG_OPTION = [
+  "--config <path>",
+  `the Local Config to use instead of the nearest ${LOCAL_CONFIG_NAME} up to the Git root. The Global Config is $LINEAR_T3_CONFIG or $XDG_CONFIG_HOME/linear-t3/config.json`,
+] as const;
 
 program
   .command("setup")
-  .description("write a starter Config to edit (refuses if the Config already exists)")
+  .description(
+    "write a starter Global Config to edit (refuses if the Global Config already exists)",
+  )
   .action(runSetup);
 
 program
@@ -287,12 +296,14 @@ program
     "--dry-run",
     "show which issues would start now and which would wait on a cap, without starting threads, then exit",
   )
+  .option(...CONFIG_OPTION)
   .action(runDaemonCommand);
 
 program
   .command("start")
   .description("install and start the Daemon as a background service; safe to run again")
-  .action(() => exitOnServiceError(start));
+  .option(...CONFIG_OPTION)
+  .action((options: { config?: string }) => exitOnServiceError(() => start(options)));
 
 program
   .command("stop")

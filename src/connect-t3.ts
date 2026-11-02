@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { DEFAULT_T3_URL } from "./config.ts";
+import { DEFAULT_T3_URL, KEYS } from "./config.ts";
 import { type CheckResult, ConnectError, type Integration } from "./connect.ts";
 import { describeTicketFailure, requestWebsocketTicket } from "./t3.ts";
 
@@ -38,11 +38,11 @@ export async function checkT3Token(
 
 const notReachable = (baseUrl: string) => `T3 not reachable at ${baseUrl}, is it running?`;
 
-const T3Url = z.object({ t3: z.object({ url: z.string().url() }) });
+const T3Url = z.object({ t3Url: KEYS.t3Url.schema });
 
 /**
- * The T3 server URL from `t3.url` in the config file, or the default. Only that field is read, so
- * a missing, unreadable or otherwise incomplete config never stops `connect`.
+ * The T3 server URL from `t3Url` in the Global Config, or the default. Only that key is read, so
+ * a missing, unreadable or otherwise invalid Config never stops `connect`.
  */
 export async function t3BaseUrl(configPath: string): Promise<string> {
   let raw: unknown;
@@ -52,7 +52,7 @@ export async function t3BaseUrl(configPath: string): Promise<string> {
     return DEFAULT_T3_URL;
   }
   const result = T3Url.safeParse(raw);
-  return result.success ? result.data.t3.url : DEFAULT_T3_URL;
+  return result.success ? result.data.t3Url : DEFAULT_T3_URL;
 }
 
 /** Issues a new T3 session token by running `t3 auth session issue`. */
