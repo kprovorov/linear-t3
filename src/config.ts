@@ -30,17 +30,13 @@ const OnLaunch = z.object({
   comment: z.boolean().optional(),
 });
 
-// How threads are started, and how many may run. Every field can be set in `defaults` and overridden per project.
+// How threads are started. Every field can be set in `defaults` and overridden per project.
 const ThreadSettings = z.object({
   workspace: WorkspaceStrategy.optional(),
   runtimeMode: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]).optional(),
-  interactionMode: z.enum(["default", "plan"]).optional(),
   // Unset everywhere means the T3 project's default model.
   model: ModelSelection.optional(),
   promptTemplate: z.string().optional(),
-  // Caps Running threads in this T3 project, including threads started by hand. Unset means no
-  // cap; 0 pauses the project.
-  maxRunningThreads: z.number().int().min(0).optional(),
 });
 
 // Settings shared by every project. A project's own value wins; nested objects (`workspace`, `model`,
@@ -49,7 +45,7 @@ const Defaults = ThreadSettings.extend({
   linear: z.object({ filter: IssueFilter.optional(), onLaunch: OnLaunch.optional() }).optional(),
 });
 
-// Which Linear issues go to one T3 project, how their threads are started, and how many may run.
+// Which Linear issues go to one T3 project, and how their threads are started.
 const ProjectEntry = ThreadSettings.extend({
   linear: z.object({
     // Linear team key, e.g. "ENG".
@@ -75,28 +71,18 @@ const ProjectSettings = z.object({
     startFromOrigin: true,
   }),
   runtimeMode: ThreadSettings.shape.runtimeMode.unwrap().default("full-access"),
-  interactionMode: ThreadSettings.shape.interactionMode.unwrap().default("default"),
   model: ModelSelection.optional(),
   promptTemplate: z.string().optional(),
-  maxRunningThreads: ThreadSettings.shape.maxRunningThreads,
 });
 
 const Config = z
   .object({
     pollIntervalSeconds: z.number().int().min(10).default(60),
-    // Caps how many threads are started per poll so a broad filter can't flood T3.
-    maxLaunchesPerPoll: z.number().int().min(1).default(5),
     // Caps Running threads across all of T3, including threads started by hand. Unset means no cap.
     maxRunningThreads: z.number().int().min(0).optional(),
     // Relative to the Config file's directory. Unset means the XDG State location.
     stateFile: z.string().optional(),
-    t3: z
-      .object({
-        url: z.string().url().default(DEFAULT_T3_URL),
-        // Optional public web URL, used to link the thread in the Linear comment.
-        webUrl: z.string().url().optional(),
-      })
-      .prefault({}),
+    t3: z.object({ url: z.string().url().default(DEFAULT_T3_URL) }).prefault({}),
     defaults: Defaults.prefault({}),
     // Keyed by T3 project id, title, or workspace root path.
     projects: z
@@ -137,8 +123,43 @@ export const DEFAULT_PROMPT = `Work on Linear issue {identifier}: {title}
 
 {description}`;
 
+// Settings that no longer exist. Rejected rather than ignored: dropping a cap or a mode silently
+// would change what gets launched, and how.
+const REMOVED = {
+  maxLaunchesPerPoll: "use maxRunningThreads to cap Running threads across T3",
+  "t3.webUrl": "the Linear comment links the thread under t3.url",
+  maxRunningThreads: "only the top-level maxRunningThreads remains",
+  interactionMode: "threads always start in T3's default interaction mode",
+};
+
+function removedKeys(raw: unknown): string[] {
+  if (typeof raw !== "object" || raw === null) return [];
+  const r = raw as Record<string, Record<string, unknown> | undefined>;
+  const isObject = (v: unknown): v is Record<string, unknown> =>
+    typeof v === "object" && v !== null;
+  const found: string[] = [];
+  if ("maxLaunchesPerPoll" in r) found.push(`maxLaunchesPerPoll: ${REMOVED.maxLaunchesPerPoll}`);
+  if (isObject(r.t3) && "webUrl" in r.t3) found.push(`t3.webUrl: ${REMOVED["t3.webUrl"]}`);
+  const scopes: [string, unknown][] = [["defaults", r.defaults]];
+  if (isObject(r.projects)) {
+    for (const [ref, entry] of Object.entries(r.projects)) scopes.push([`projects.${ref}`, entry]);
+  }
+  for (const [where, settings] of scopes) {
+    if (!isObject(settings)) continue;
+    for (const key of ["maxRunningThreads", "interactionMode"] as const) {
+      if (key in settings) found.push(`${where}.${key}: ${REMOVED[key]}`);
+    }
+  }
+  return found;
+}
+
 export async function loadConfig(path: string): Promise<Config> {
   const raw = JSON.parse(await readFile(path, "utf8"));
+  const removed = removedKeys(raw);
+  if (removed.length > 0) {
+    const lines = removed.map((line) => `  ✖ ${line}`).join("\n");
+    throw new Error(`Invalid config ${path}: remove settings that no longer exist:\n${lines}`);
+  }
   const result = Config.safeParse(raw);
   if (!result.success) {
     throw new Error(`Invalid config ${path}:\n${z.prettifyError(result.error)}`);

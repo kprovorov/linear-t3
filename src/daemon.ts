@@ -62,16 +62,22 @@ function workspaceFor(settings: ProjectSettings, issue: Issue): WorkspaceStrateg
 }
 
 async function threadLink(config: Config, threadId: string): Promise<string> {
-  if (!config.t3.webUrl) return `\`${threadId}\``;
   const home = process.env.T3CODE_HOME ?? join(homedir(), ".t3");
-  const environmentId = (await readFile(join(home, "userdata", "environment-id"), "utf8")).trim();
-  return new URL(`/${environmentId}/${threadId}`, config.t3.webUrl).toString();
+  let environmentId: string;
+  try {
+    environmentId = (await readFile(join(home, "userdata", "environment-id"), "utf8")).trim();
+  } catch (error) {
+    // T3 isn't on this machine, so there's no link to build; retrying won't change that.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return `\`${threadId}\``;
+    throw error;
+  }
+  return new URL(`/${environmentId}/${threadId}`, config.t3.url).toString();
 }
 
 // Launching without being able to record launches risks duplicate threads, so this stops the daemon.
 class StateWriteError extends Error {}
 
-// The launch RPC failed but the thread may exist, so it counts toward the per-poll cap.
+// The launch RPC failed but the thread may exist, so it counts as Running until the next snapshot.
 class LaunchMayHaveStarted extends Error {
   constructor(cause: unknown) {
     super((cause as Error).message, { cause });
@@ -129,7 +135,6 @@ async function launchIssue(
       title: `${issue.identifier}: ${issue.title}`,
       modelSelection,
       runtimeMode: settings.runtimeMode,
-      interactionMode: settings.interactionMode,
       workspaceStrategy: workspaceFor(settings, issue),
       message: renderPrompt(settings.promptTemplate ?? DEFAULT_PROMPT, issue),
     })
@@ -279,7 +284,7 @@ async function collectCandidates(
     }
   }
 
-  // Round-robin across projects so a busy project can't use up the whole per-poll cap.
+  // Round-robin across projects so a busy project can't take every free slot under the cap.
   const queues = new Map<string, Candidate[]>();
   for (const candidate of pending.values()) {
     const queue = queues.get(candidate.projectRef);
@@ -292,28 +297,6 @@ async function collectCandidates(
     for (const queue of queues.values()) if (queue[i]) ordered.push(queue[i]!);
   }
   return ordered;
-}
-
-/** A dry run's header: Running threads in T3, and in each project that has a cap. */
-function logDryRunHeader(
-  config: Config,
-  projects: T3Project[],
-  running: Map<string, number>,
-  runningInT3: number,
-): void {
-  const cap = config.maxRunningThreads;
-  log(`T3 has ${runningInT3}${cap === undefined ? "" : `/${cap}`} running`);
-  for (const [projectRef, settings] of Object.entries(config.projects)) {
-    if (settings.maxRunningThreads === undefined) continue;
-    let count: number;
-    try {
-      count = running.get(findProject(projects, projectRef).id) ?? 0;
-    } catch (error) {
-      log(`project "${projectRef}": ${(error as Error).message}`);
-      continue;
-    }
-    log(`project "${projectRef}" has ${count}/${settings.maxRunningThreads} running`);
-  }
 }
 
 /**
@@ -339,19 +322,14 @@ async function launchCandidates(
     const { projects, threads } = await t3
       .readShell()
       .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
-    // Running threads per T3 project, plus new threads this poll, which count as Running until the
-    // next snapshot.
-    const runningThreads = threads.filter(isRunningThread);
-    const running = new Map<string, number>();
-    for (const { projectId } of runningThreads)
-      running.set(projectId, (running.get(projectId) ?? 0) + 1);
-    let runningInT3 = runningThreads.length;
-    const cap = config.maxRunningThreads ?? Infinity;
+    // Running threads in T3, plus new threads this poll, which count as Running until the next
+    // snapshot.
+    let runningInT3 = threads.filter(isRunningThread).length;
+    const cap = config.maxRunningThreads;
     const threadIds = new Set(threads.map((thread) => thread.id));
-    if (dryRun) logDryRunHeader(config, projects, running, runningInT3);
-    let launched = 0;
-    // Keep going past failures and full projects, so neither can block later candidates. The cap
-    // check needs the T3 project, so an unknown project ref fails even when nothing has room.
+    if (dryRun) log(`T3 has ${runningInT3}${cap === undefined ? "" : `/${cap}`} running`);
+    // Keep going past failures, so one can't block later candidates. An unknown project ref fails
+    // even when nothing has room.
     for (const candidate of candidates) {
       if (shutdown.signal.aborted) break;
       const { issue, projectRef, settings } = candidate;
@@ -364,32 +342,14 @@ async function launchCandidates(
         else failLaunch(issue, error);
         continue;
       }
-      const runningInProject = running.get(project.id) ?? 0;
-      const projectCap = settings.maxRunningThreads ?? Infinity;
       // T3 already has this issue's thread from a launch whose outcome was lost, and counts it.
       // Launching again only records it, so it needs no room under any limit.
       const inT3 = threadIds.has(threadIdFor(launchKey(issue.id, attempt)));
       if (!inT3) {
         // Held back, not failed: no backoff, so it's a candidate again next poll.
-        // `label` names the full cap for a dry run; `reason` is what a real run logs, if anything.
-        let full: { label: string; reason?: string } | undefined;
-        if (runningInT3 >= cap) {
-          full = {
-            label: `global ${runningInT3}/${cap}`,
-            reason: `T3 has ${runningInT3}/${cap} running`,
-          };
-        } else if (runningInProject >= projectCap) {
-          const count = `${runningInProject}/${projectCap}`;
-          full = {
-            label: `project "${projectRef}" ${count}`,
-            reason: `project "${projectRef}" has ${count} running`,
-          };
-        } else if (launched >= config.maxLaunchesPerPoll) {
-          full = { label: `maxLaunchesPerPoll ${launched}/${config.maxLaunchesPerPoll}` };
-        }
-        if (full) {
-          if (dryRun) log(`${issue.identifier} would wait (${full.label})`);
-          else if (full.reason) log(`${issue.identifier} waiting: ${full.reason}`);
+        if (cap !== undefined && runningInT3 >= cap) {
+          if (dryRun) log(`${issue.identifier} would wait (global ${runningInT3}/${cap})`);
+          else log(`${issue.identifier} waiting: T3 has ${runningInT3}/${cap} running`);
           continue;
         }
       }
@@ -413,11 +373,7 @@ async function launchCandidates(
           failLaunch(issue, error);
         }
       }
-      if (started && !inT3) {
-        launched++;
-        runningInT3++;
-        running.set(project.id, runningInProject + 1);
-      }
+      if (started && !inT3) runningInT3++;
     }
   } finally {
     t3.close();

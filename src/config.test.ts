@@ -37,27 +37,21 @@ describe("loadConfig", () => {
     expect((await loadConfig(path)).maxRunningThreads).toBe(value);
   });
 
-  test("a project's maxRunningThreads wins over defaults, and unset means no cap", async () => {
-    const path = writeConfig({
-      defaults: { maxRunningThreads: 2 },
-      projects: {
-        app: { linear: { team: "ENG" } },
-        infra: { linear: { team: "OPS" }, maxRunningThreads: 0 },
-      },
-    });
-    const { projects } = await loadConfig(path);
-    expect(projects.app?.maxRunningThreads).toBe(2);
-    expect(projects.infra?.maxRunningThreads).toBe(0);
-
-    const unset = writeConfig({ projects: { app: { linear: { team: "ENG" } } } });
-    expect((await loadConfig(unset)).projects.app?.maxRunningThreads).toBeUndefined();
-  });
-
   test.each([
-    { defaults: { maxRunningThreads: -1 } },
-    { projects: { app: { linear: { team: "ENG" }, maxRunningThreads: 1.5 } } },
-  ])("rejects a per-project maxRunningThreads that isn't an integer ≥ 0: %j", async (config) => {
+    [{ maxLaunchesPerPoll: 5 }, "maxLaunchesPerPoll"],
+    [{ t3: { webUrl: "https://t3.example.com" } }, "t3.webUrl"],
+    [{ defaults: { maxRunningThreads: 2 } }, "defaults.maxRunningThreads"],
+    [{ defaults: { interactionMode: "plan" } }, "defaults.interactionMode"],
+    [
+      { projects: { app: { linear: { team: "ENG" }, maxRunningThreads: 0 } } },
+      "projects.app.maxRunningThreads",
+    ],
+    [
+      { projects: { app: { linear: { team: "ENG" }, interactionMode: "plan" } } },
+      "projects.app.interactionMode",
+    ],
+  ])("rejects the removed setting in %j", async (config, key) => {
     const path = writeConfig({ projects: { app: { linear: { team: "ENG" } } }, ...config });
-    await expect(loadConfig(path)).rejects.toThrow(/maxRunningThreads/);
+    await expect(loadConfig(path)).rejects.toThrow(`${key}: `);
   });
 });
