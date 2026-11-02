@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { loadConfig } from "./config.ts";
 import type { CheckResult } from "./connect.ts";
 import { checkT3Token, t3BaseUrl } from "./connect-t3.ts";
@@ -27,23 +26,28 @@ async function checkToken(
 }
 
 /**
- * Everything that would stop the background Daemon from starting: a missing or invalid Config, a
- * token missing from the Credentials, or one its Integration rejects or can't check. Each problem
- * names its fix.
+ * Everything that would stop the background Daemon from starting: an invalid or incomplete Config,
+ * a token missing from the Credentials, or one its Integration rejects or can't check. Each problem
+ * names its fix. Also says which Local Config the Daemon should be pinned to, if any.
  */
-export async function preflight(paths: Paths): Promise<string[]> {
+export async function preflight(
+  paths: Paths,
+  localConfig: string | undefined,
+): Promise<{ problems: string[]; localConfig?: string }> {
   const problems: string[] = [];
-  if (!existsSync(paths.config)) {
-    problems.push(`No Config at ${paths.config}: run \`linear-t3 setup\``);
-  } else {
-    try {
-      await loadConfig(paths.config);
-    } catch (error) {
-      const reason = message(error).startsWith("Invalid config")
-        ? message(error)
-        : `Invalid config ${paths.config}: ${message(error)}`;
-      problems.push(`${reason}\n  fix it, then run \`linear-t3 start\` again`);
-    }
+  let t3Url: string | undefined;
+  let pinned: string | undefined;
+  try {
+    const config = await loadConfig({
+      global: paths.globalConfig,
+      local: localConfig,
+      cwd: process.cwd(),
+      defaultState: paths.defaultState,
+    });
+    t3Url = config.t3Url;
+    pinned = config.files.local;
+  } catch (error) {
+    problems.push(`${message(error)}\n  fix it, then run \`linear-t3 start\` again`);
   }
 
   const credentials = new EnvFile(paths.credentials);
@@ -61,10 +65,13 @@ export async function preflight(paths: Paths): Promise<string[]> {
   };
   const t3Token = token("T3_TOKEN", "t3");
   const linearKey = token("LINEAR_API_KEY", "linear");
-  const t3Url = await t3BaseUrl(paths.config);
+  t3Url ??= await t3BaseUrl(paths.globalConfig);
   const failures = await Promise.all([
     t3Token === undefined ? undefined : checkToken(() => checkT3Token(t3Url, t3Token), "t3"),
     linearKey === undefined ? undefined : checkToken(() => checkLinear(linearKey), "linear"),
   ]);
-  return [...problems, ...failures.filter((failure) => failure !== undefined)];
+  return {
+    problems: [...problems, ...failures.filter((failure) => failure !== undefined)],
+    localConfig: pinned,
+  };
 }

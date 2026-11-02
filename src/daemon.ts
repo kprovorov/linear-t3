@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { DEFAULT_PROMPT, loadConfig, type Config, type ProjectSettings } from "./config.ts";
+import { loadConfig, type Config } from "./config.ts";
 import { EnvFile } from "./env-file.ts";
 import {
   createCommentOnce,
@@ -12,13 +12,14 @@ import {
   type Issue,
   type LinearClient,
 } from "./linear.ts";
-import { type Paths, resolveStateFile } from "./paths.ts";
+import type { Paths } from "./paths.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import {
   T3Client,
   T3ThreadNotCreated,
   isRunningThread,
   threadIdFor,
+  type ModelSelection,
   type T3Project,
   type WorkspaceStrategy,
 } from "./t3.ts";
@@ -40,7 +41,9 @@ function renderPrompt(template: string, issue: Issue): string {
   return template.replace(/\{(\w+)\}/g, (match, key: string) => vars[key] ?? match);
 }
 
-function findProject(projects: T3Project[], ref: string): T3Project {
+/** The T3 project `config.project` names: by id, folder path, or unique title. */
+function findProject(projects: T3Project[], config: Config): T3Project {
+  const ref = config.project;
   const exact = projects.find((p) => p.id === ref || p.workspaceRoot === ref);
   if (exact) return exact;
   // Titles aren't unique; launching into the wrong workspace is worse than failing.
@@ -52,13 +55,18 @@ function findProject(projects: T3Project[], ref: string): T3Project {
       `Several T3 projects are titled "${ref}" (${roots}); use the id or workspace path instead`,
     );
   }
+  // A relative path is relative to the Config file that set it.
+  const folder = resolve(config.projectBase, ref);
+  const byFolder = projects.find((p) => p.workspaceRoot === folder);
+  if (byFolder) return byFolder;
   const known = projects.map((p) => `"${p.title}" (${p.workspaceRoot})`).join(", ");
   throw new Error(`No T3 project matches "${ref}". Known projects: ${known}`);
 }
 
-function workspaceFor(settings: ProjectSettings, issue: Issue): WorkspaceStrategy {
-  const ws = settings.workspace;
-  return ws.type === "root" ? { type: "root" } : { ...ws, branch: issue.branchName };
+function workspaceFor(config: Config, issue: Issue): WorkspaceStrategy {
+  if (config.workspace === "local") return { type: "root" };
+  const { baseRef, startFromOrigin } = config;
+  return { type: "worktree", baseRef, startFromOrigin, branch: issue.branchName };
 }
 
 async function threadLink(config: Config, threadId: string): Promise<string> {
@@ -71,7 +79,7 @@ async function threadLink(config: Config, threadId: string): Promise<string> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return `\`${threadId}\``;
     throw error;
   }
-  return new URL(`/${environmentId}/${threadId}`, config.t3.url).toString();
+  return new URL(`/${environmentId}/${threadId}`, config.t3Url).toString();
 }
 
 // Launching without being able to record launches risks duplicate threads, so this stops the daemon.
@@ -103,30 +111,40 @@ function launchKey(issueId: string, attempt: number): string {
   return attempt === 0 ? issueId : `${issueId}:${attempt}`;
 }
 
-function modelFor(settings: ProjectSettings, project: T3Project, projectRef: string) {
-  const modelSelection = settings.model ?? project.defaultModelSelection;
-  if (!modelSelection) {
+/**
+ * `model` on `provider`, else on the Provider of the T3 project's default model; with no `model`,
+ * the T3 project's default model, options included.
+ */
+function modelFor(config: Config, project: T3Project): ModelSelection {
+  const fallback = project.defaultModelSelection;
+  if (config.model === undefined) {
+    if (!fallback) {
+      throw new Error(`No model configured and T3 project "${project.title}" has no default model`);
+    }
+    if (config.provider !== undefined && config.provider !== fallback.instanceId) {
+      throw new Error(
+        `provider is "${config.provider}" but no model is set, and T3 project "${project.title}" defaults to "${fallback.model}" on "${fallback.instanceId}"`,
+      );
+    }
+    return fallback;
+  }
+  const instanceId = config.provider ?? fallback?.instanceId;
+  if (instanceId === undefined) {
     throw new Error(
-      `No model configured for project "${projectRef}" and the T3 project has no default model`,
+      `No provider configured for model "${config.model}" and T3 project "${project.title}" has no default model to take it from`,
     );
   }
-  return modelSelection;
-}
-
-interface Candidate {
-  issue: Issue;
-  projectRef: string;
-  settings: ProjectSettings;
+  return { instanceId, model: config.model };
 }
 
 async function launchIssue(
-  { issue, projectRef, settings }: Candidate,
+  issue: Issue,
   project: T3Project,
   attempt: number,
   ctx: { config: Config; t3: T3Client; linear: LinearClient; state: StateStore },
 ): Promise<void> {
   const { config, t3, linear, state } = ctx;
-  const modelSelection = modelFor(settings, project, projectRef);
+  const modelSelection = modelFor(config, project);
 
   const { threadId, resumed } = await t3
     .launchThread({
@@ -134,22 +152,21 @@ async function launchIssue(
       projectId: project.id,
       title: `${issue.identifier}: ${issue.title}`,
       modelSelection,
-      runtimeMode: settings.runtimeMode,
-      workspaceStrategy: workspaceFor(settings, issue),
-      message: renderPrompt(settings.promptTemplate ?? DEFAULT_PROMPT, issue),
+      runtimeMode: config.runtimeMode,
+      workspaceStrategy: workspaceFor(config, issue),
+      message: renderPrompt(config.prompt, issue),
     })
     .catch((error: unknown) => {
       throw error instanceof T3ThreadNotCreated ? error : new LaunchMayHaveStarted(error);
     });
   // Record before touching Linear: a failed Linear update must never cause a duplicate thread.
-  const { onLaunch } = settings.linear;
   const record: LaunchRecord = {
     identifier: issue.identifier,
     threadId,
     launchedAt: new Date().toISOString(),
     pendingActions: {
-      ...(onLaunch.comment && { comment: true }),
-      ...(onLaunch.moveToState && { moveToState: onLaunch.moveToState }),
+      ...(config.comment && { comment: true }),
+      ...(config.setStatus && { moveToState: config.setStatus }),
     },
   };
   await recordOrStop(state, issue.id, record);
@@ -234,7 +251,7 @@ async function poll(
   if (candidates.length === 0 && !dryRun) return;
   if (candidates.length > 0)
     log(
-      `${candidates.length} new issue(s): ${candidates.map((p) => p.issue.identifier).join(", ")}`,
+      `${candidates.length} new issue(s): ${candidates.map((issue) => issue.identifier).join(", ")}`,
     );
   if (shutdown.signal.aborted) return;
   await launchCandidates(candidates, { config, linear, state, t3Token, dryRun });
@@ -244,59 +261,27 @@ async function poll(
 const priorityRank = (priority: number) => (priority === 0 ? 5 : priority);
 
 /** Most urgent first, then oldest first. */
-function byLaunchOrder(a: Candidate, b: Candidate): number {
+function byLaunchOrder(a: Issue, b: Issue): number {
   return (
-    priorityRank(a.issue.priority) - priorityRank(b.issue.priority) ||
-    a.issue.createdAt.getTime() - b.issue.createdAt.getTime()
+    priorityRank(a.priority) - priorityRank(b.priority) ||
+    a.createdAt.getTime() - b.createdAt.getTime()
   );
 }
 
-/**
- * Matching issues not launched yet and not backing off, round-robin across projects. Each
- * project's queue runs by priority, then oldest first.
- */
+/** Matching issues not launched yet and not backing off, by priority, then oldest first. */
 async function collectCandidates(
   config: Config,
   linear: LinearClient,
   state: StateStore,
-): Promise<Candidate[]> {
+): Promise<Issue[]> {
   const now = Date.now();
-  const pending = new Map<string, Candidate>();
-  for (const [projectRef, settings] of Object.entries(config.projects)) {
-    if (shutdown.signal.aborted) return [];
-    // Every poll reads all matching issues: one can start matching without being updated itself,
-    // e.g. when its blocker is done.
-    const filter = {
-      and: [{ team: { key: { eq: settings.linear.team } } }, settings.linear.filter ?? {}],
-    };
-    const issues = await listIssues(linear, filter, shutdown.signal);
-    for (const issue of issues) {
-      if (state.has(issue.id) || (launchFailures.get(issue.id)?.retryAt ?? 0) > now) continue;
-      // An issue matched by several projects gets a single thread, in the first matching project.
-      const existing = pending.get(issue.id);
-      if (existing) {
-        log(
-          `${issue.identifier}: matches both "${existing.projectRef}" and "${projectRef}", using "${existing.projectRef}"`,
-        );
-        continue;
-      }
-      pending.set(issue.id, { issue, projectRef, settings });
-    }
-  }
-
-  // Round-robin across projects so a busy project can't take every free slot under the cap.
-  const queues = new Map<string, Candidate[]>();
-  for (const candidate of pending.values()) {
-    const queue = queues.get(candidate.projectRef);
-    if (queue) queue.push(candidate);
-    else queues.set(candidate.projectRef, [candidate]);
-  }
-  for (const queue of queues.values()) queue.sort(byLaunchOrder);
-  const ordered: Candidate[] = [];
-  for (let i = 0; ordered.length < pending.size; i++) {
-    for (const queue of queues.values()) if (queue[i]) ordered.push(queue[i]!);
-  }
-  return ordered;
+  // Every poll reads all matching issues: one can start matching without being updated itself,
+  // e.g. when its blocker is done.
+  const filter = { and: [{ team: { key: { eq: config.team } } }, config.filter ?? {}] };
+  const issues = await listIssues(linear, filter, shutdown.signal);
+  return issues
+    .filter((issue) => !state.has(issue.id) && (launchFailures.get(issue.id)?.retryAt ?? 0) <= now)
+    .sort(byLaunchOrder);
 }
 
 /**
@@ -304,7 +289,7 @@ async function collectCandidates(
  * what would start and what would wait, and launches nothing.
  */
 async function launchCandidates(
-  candidates: Candidate[],
+  candidates: Issue[],
   ctx: {
     config: Config;
     linear: LinearClient;
@@ -314,7 +299,7 @@ async function launchCandidates(
   },
 ): Promise<void> {
   const { config, linear, state, t3Token, dryRun } = ctx;
-  const t3 = await T3Client.connect(config.t3.url, t3Token, shutdown.signal);
+  const t3 = await T3Client.connect(config.t3Url, t3Token, shutdown.signal);
   try {
     // Shutdown may arrive while reading projects; closing the socket ends that wait.
     const closeOnShutdown = () => t3.close();
@@ -328,20 +313,12 @@ async function launchCandidates(
     const cap = config.maxRunningThreads;
     const threadIds = new Set(threads.map((thread) => thread.id));
     if (dryRun) log(`T3 has ${runningInT3}${cap === undefined ? "" : `/${cap}`} running`);
-    // Keep going past failures, so one can't block later candidates. An unknown project ref fails
-    // even when nothing has room.
-    for (const candidate of candidates) {
+    // An unknown project fails the poll, even when nothing has room.
+    const project = findProject(projects, config);
+    // Keep going past failures, so one can't block later candidates.
+    for (const issue of candidates) {
       if (shutdown.signal.aborted) break;
-      const { issue, projectRef, settings } = candidate;
       const attempt = launchFailures.get(issue.id)?.attempt ?? 0;
-      let project: T3Project;
-      try {
-        project = findProject(projects, projectRef);
-      } catch (error) {
-        if (dryRun) log(`${issue.identifier} would fail: ${(error as Error).message}`);
-        else failLaunch(issue, error);
-        continue;
-      }
       // T3 already has this issue's thread from a launch whose outcome was lost, and counts it.
       // Launching again only records it, so it needs no room under any limit.
       const inT3 = threadIds.has(threadIdFor(launchKey(issue.id, attempt)));
@@ -356,7 +333,7 @@ async function launchCandidates(
       let started = dryRun;
       if (dryRun) {
         try {
-          modelFor(settings, project, projectRef);
+          modelFor(config, project);
           log(`${issue.identifier} ${inT3 ? "would record its existing thread" : "would start"}`);
         } catch (error) {
           log(`${issue.identifier} would fail: ${(error as Error).message}`);
@@ -364,7 +341,7 @@ async function launchCandidates(
         }
       } else {
         try {
-          await launchIssue(candidate, project, attempt, { config, t3, linear, state });
+          await launchIssue(issue, project, attempt, { config, t3, linear, state });
           launchFailures.delete(issue.id);
           started = true;
         } catch (error) {
@@ -393,6 +370,8 @@ function requireToken(key: string, credentials: EnvFile, integration: string): s
 
 export interface DaemonOptions {
   paths: Paths;
+  // `--config`: the Local Config to use instead of the one found from the working directory.
+  localConfig?: string;
   // Do one poll, then exit.
   once: boolean;
   // Show which issues would start and which would wait on a cap, without starting threads.
@@ -400,7 +379,12 @@ export interface DaemonOptions {
 }
 
 /** Runs the Daemon's poll loop until SIGINT/SIGTERM, or for a single poll with `once`. */
-export async function runDaemon({ paths, once, dryRun }: DaemonOptions): Promise<void> {
+export async function runDaemon({
+  paths,
+  localConfig,
+  once,
+  dryRun,
+}: DaemonOptions): Promise<void> {
   const stop = (signal: string) => {
     log(`received ${signal}, shutting down`);
     shutdown.abort();
@@ -408,17 +392,21 @@ export async function runDaemon({ paths, once, dryRun }: DaemonOptions): Promise
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
 
-  const config = await loadConfig(paths.config);
+  const config = await loadConfig({
+    global: paths.globalConfig,
+    local: localConfig,
+    cwd: process.cwd(),
+    defaultState: paths.defaultState,
+  });
   const credentials = new EnvFile(paths.credentials);
   const linearKey = requireToken("LINEAR_API_KEY", credentials, "linear");
   const linear = createLinearClient(linearKey, shutdown.signal);
   const t3Token = requireToken("T3_TOKEN", credentials, "t3");
-  const state = new StateStore(resolveStateFile(paths, config.stateFile));
+  const state = new StateStore(config.stateFile);
   // A dry run launches nothing, so it never writes State.
   await state.load({ checkWritable: !dryRun });
 
-  const watching = Object.entries(config.projects).map(([ref, p]) => `${p.linear.team} -> ${ref}`);
-  log(`watching ${watching.join(", ")}`);
+  log(`watching ${config.team} -> ${config.project}`);
   while (!shutdown.signal.aborted) {
     try {
       await poll(config, linear, state, t3Token, dryRun);
@@ -428,7 +416,7 @@ export async function runDaemon({ paths, once, dryRun }: DaemonOptions): Promise
       if (once) process.exitCode = 1;
     }
     if (once || shutdown.signal.aborted) break;
-    await setTimeout(config.pollIntervalSeconds * 1000, undefined, {
+    await setTimeout(config.pollInterval * 1000, undefined, {
       signal: shutdown.signal,
     }).catch(() => {});
   }

@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 type Env = Record<string, string | undefined>;
 
@@ -21,8 +21,8 @@ const stateDir = (env: Env) => join(xdgDir(env, "XDG_STATE_HOME", ".local/state"
 
 /** Where linear-t3 keeps its files, resolved from the environment. */
 export interface Paths {
-  /** The Config file: `--config`, else `LINEAR_T3_CONFIG`, else the XDG config location. */
-  config: string;
+  /** The Global Config: `LINEAR_T3_CONFIG`, else the XDG config location. */
+  globalConfig: string;
   /** The Credentials file, always in the XDG config location. */
   credentials: string;
   /** Where State goes when the Config doesn't set `stateFile`. */
@@ -35,18 +35,13 @@ export interface Paths {
   systemdUnit: string;
 }
 
-export function resolvePaths(configFlag?: string, env: Env = process.env): Paths {
+export function resolvePaths(env: Env = process.env): Paths {
   return {
-    config: resolve(configFlag || env.LINEAR_T3_CONFIG || join(configDir(env), "config.json")),
+    globalConfig: resolve(env.LINEAR_T3_CONFIG || join(configDir(env), "config.json")),
     credentials: join(configDir(env), "credentials"),
     defaultState: join(stateDir(env), "state.json"),
     log: join(stateDir(env), "daemon.log"),
     launchAgent: join(home(env), "Library", "LaunchAgents", `${APP}.plist`),
     systemdUnit: join(xdgConfig(env), "systemd", "user", `${APP}.service`),
   };
-}
-
-/** The State file: `stateFile` from the Config resolved against the Config's directory, or the default. */
-export function resolveStateFile(paths: Paths, stateFile: string | undefined): string {
-  return stateFile ? resolve(dirname(paths.config), stateFile) : paths.defaultState;
 }

@@ -1,4 +1,3 @@
-import type { ModelSelection } from "./config.ts";
 import { stableUuid } from "./uuid.ts";
 
 // Minimal client for the T3 Code server's WebSocket RPC (Effect RPC, JSON serialization).
@@ -9,6 +8,13 @@ import { stableUuid } from "./uuid.ts";
 // These are internal T3 Code APIs reverse-engineered from the web client
 // (orchestration.subscribeShell / orchestration.launchThread); they may change
 // between T3 Code releases.
+
+/** A T3 model choice: the Provider instance and its model, with T3's model options. */
+export interface ModelSelection {
+  instanceId: string;
+  model: string;
+  options?: unknown;
+}
 
 export interface T3Project {
   id: string;

@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -156,13 +157,17 @@ function startCliInTerminal(options: { cwd: string; env: Record<string, string> 
   return { answer, result };
 }
 
-/** A temporary directory holding `config.json` with one project for Linear team `ENG`. */
-function workDir(config: Record<string, unknown> = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "linear-t3-cli-"));
-  writeFileSync(
-    join(dir, "config.json"),
-    JSON.stringify({ projects: { "my-app": { linear: { team: "ENG" } } }, ...config }),
-  );
+const LOCAL = "linear-t3.config.json";
+
+/**
+ * A temporary Git repository whose Local Config watches Linear team `ENG` for T3 project `my-app`,
+ * with `local` merged in. `undefined` values drop a key.
+ */
+function repoDir(local: Record<string, unknown> = {}) {
+  // The real path: on macOS the temp dir is a symlink, and the CLI sees its working directory resolved.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "linear-t3-repo-")));
+  mkdirSync(join(dir, ".git"));
+  writeFileSync(join(dir, LOCAL), JSON.stringify({ project: "my-app", team: "ENG", ...local }));
   return dir;
 }
 
@@ -189,13 +194,13 @@ describe("cli", () => {
     },
   );
 
-  test("run --help lists --once, --dry-run and --config", () => {
+  test("run --help lists --once, --dry-run and --config for the Local Config", () => {
     const result = runCli("run", "--help");
     expect(result.status).toBe(0);
     expect(result.stdout).toMatch(/^Usage: linear-t3 run /);
     expect(result.stdout).toMatch(/^\s+--once\b/m);
     expect(result.stdout).toMatch(/^\s+--dry-run\b/m);
-    expect(result.stdout).toMatch(/^\s+--config <path>/m);
+    expect(result.stdout).toMatch(/^\s+--config <path>\s+the Local Config/m);
   });
 
   test("an unknown flag prints an error and exits non-zero", () => {
@@ -231,7 +236,7 @@ describe("cli run", () => {
     { missing: "LINEAR_API_KEY", env: {}, args: ["--dry-run"] },
     { missing: "T3_TOKEN", env: { LINEAR_API_KEY: "lin-key" }, args: ["--dry-run"] },
   ])("$args without $missing exits non-zero naming it", ({ missing, env, args }) => {
-    const result = runCliIn({ cwd: workDir(), env }, "run", "--config", "config.json", ...args);
+    const result = runCliIn({ cwd: repoDir(), env }, "run", ...args);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`Missing ${missing}`);
     expect(result.stderr).toContain("linear-t3 connect");
@@ -240,7 +245,7 @@ describe("cli run", () => {
   test("reads the tokens from the Credentials file", () => {
     const home = homeDir();
     const { credentials } = locations(home);
-    const run = () => runCliIn({ cwd: workDir(), env: home }, "run", "--config", "config.json");
+    const run = () => runCliIn({ cwd: repoDir(), env: home }, "run");
     writeFile(credentials, "T3_TOKEN=t3-tok\n");
     expect(run().stderr).toContain("Missing LINEAR_API_KEY");
     writeFile(credentials, "LINEAR_API_KEY=lin-key\n");
@@ -248,14 +253,14 @@ describe("cli run", () => {
   });
 
   test("ignores tokens in ./.env", () => {
-    const dir = workDir();
+    const dir = repoDir();
     writeFileSync(join(dir, ".env"), "LINEAR_API_KEY=lin-key\nT3_TOKEN=t3-tok\n");
-    const result = runCliIn({ cwd: dir }, "run", "--config", "config.json");
+    const result = runCliIn({ cwd: dir }, "run");
     expect(result.stderr).toContain("Missing LINEAR_API_KEY");
   });
 
-  test("a missing Config exits non-zero naming the path given with --config", () => {
-    const dir = workDir();
+  test("a missing Local Config given with --config exits non-zero naming its path", () => {
+    const dir = repoDir();
     const env = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
     const result = runCliIn({ cwd: dir, env }, "run", "--once", "--config", "nope.json");
     expect(result.status).toBe(1);
@@ -264,46 +269,159 @@ describe("cli run", () => {
 
   test.each<{
     case: string;
-    args: (dirs: Record<string, string>) => string[];
     env: (dirs: Record<string, string>) => Record<string, string>;
     used: string;
   }>([
     {
-      case: "--config beats LINEAR_T3_CONFIG",
-      args: (d) => ["--config", d.flag!],
-      env: (d) => ({ LINEAR_T3_CONFIG: d.env! }),
-      used: "flag",
-    },
-    {
-      case: "LINEAR_T3_CONFIG beats the XDG default",
-      args: () => [],
+      case: "LINEAR_T3_CONFIG moves the Global Config",
       env: (d) => ({ LINEAR_T3_CONFIG: d.env! }),
       used: "env",
     },
-    { case: "the XDG default is used last", args: () => [], env: () => ({}), used: "xdg" },
-    {
-      case: "CONFIG_PATH is ignored",
-      args: () => [],
-      env: (d) => ({ CONFIG_PATH: d.env! }),
-      used: "xdg",
-    },
-  ])("$case", ({ args, env, used }) => {
+    { case: "the Global Config is in the XDG location by default", env: () => ({}), used: "xdg" },
+    { case: "CONFIG_PATH is ignored", env: (d) => ({ CONFIG_PATH: d.env! }), used: "xdg" },
+  ])("$case", ({ env, used }) => {
     const home = homeDir();
     const base = mkdtempSync(join(tmpdir(), "linear-t3-configs-"));
     const dirs: Record<string, string> = {
-      flag: join(base, "flag.json"),
       env: join(base, "env.json"),
       xdg: locations(home).config,
     };
+    // Both are invalid, so the error names the one that was read.
+    for (const path of Object.values(dirs)) writeFile(path, JSON.stringify({ bogus: true }));
     const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
     const result = runCliIn(
-      { cwd: workDir(), env: { ...home, ...tokens, ...env(dirs) } },
+      { cwd: repoDir(), env: { ...home, ...tokens, ...env(dirs) } },
       "run",
       "--once",
-      ...args(dirs),
     );
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(dirs[used]);
+    expect(result.stderr).toContain(`Invalid config ${dirs[used]}`);
+  });
+
+  test.each<{
+    case: string;
+    global?: Record<string, unknown>;
+    local?: Record<string, unknown>;
+    errors: (files: { global: string; local: string }) => string[];
+  }>([
+    {
+      case: "team in the Global Config",
+      global: { team: "ENG" },
+      errors: (f) => [
+        `Invalid config ${f.global}:`,
+        "team: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
+      ],
+    },
+    {
+      case: "t3Url in a Local Config",
+      local: { t3Url: "http://127.0.0.1:1" },
+      errors: (f) => [
+        `Invalid config ${f.local}:`,
+        `t3Url: only goes in the Global Config (${f.global})`,
+      ],
+    },
+    {
+      case: "an unknown key",
+      local: { bogus: 1 },
+      errors: (f) => [`Invalid config ${f.local}:`, "bogus: unknown key"],
+    },
+    {
+      case: "a renamed key",
+      global: { pollIntervalSeconds: 30 },
+      errors: (f) => [
+        `Invalid config ${f.global}:`,
+        'pollIntervalSeconds: renamed to "pollInterval"',
+      ],
+    },
+    {
+      case: "an invalid value",
+      global: { pollInterval: 5 },
+      errors: (f) => [`Invalid config ${f.global}:`, "pollInterval: "],
+    },
+    {
+      case: "the old projects/defaults shape",
+      global: {
+        t3: { url: "http://127.0.0.1:1" },
+        projects: { "my-app": { linear: { team: "ENG" } } },
+      },
+      errors: (f) => [
+        `Invalid config ${f.global}: "projects" and "defaults" are the old Config shape`,
+        "linear.onLaunch.moveToState → setStatus",
+        "promptTemplate → prompt, pollIntervalSeconds → pollInterval, t3.url → t3Url",
+        'workspace.type "root" → workspace "local"',
+      ],
+    },
+    {
+      case: "a Local Config in the old nested shape",
+      local: { team: undefined, linear: { team: "ENG" }, workspace: { type: "root" } },
+      errors: (f) => [
+        `Invalid config ${f.local}:`,
+        "linear: renamed to team, filter, setStatus and comment",
+        "workspace: ",
+        'workspace.type "root" → workspace "local"',
+      ],
+    },
+    {
+      case: "no team",
+      local: { team: undefined },
+      errors: (f) => [`Missing "team": set it in the Local Config (${f.local})`],
+    },
+    {
+      case: "no project",
+      local: { project: undefined },
+      errors: (f) => [`Missing "project": set it in the Local Config (${f.local})`],
+    },
+  ])(
+    "$case exits non-zero with an error naming the file and the fix",
+    ({ global, local, errors }) => {
+      const home = homeDir();
+      const files = { global: locations(home).config, local: "" };
+      if (global) writeFile(files.global, JSON.stringify(global));
+      const dir = repoDir(local);
+      files.local = join(dir, LOCAL);
+      const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
+      const result = runCliIn({ cwd: dir, env: { ...home, ...tokens } }, "run", "--once");
+      expect(result.status).toBe(1);
+      for (const error of errors(files)) expect(result.stderr).toContain(error);
+    },
+  );
+
+  test("--config naming the Global Config, as older background services do, says to run start again", () => {
+    const home = homeDir();
+    const { config } = locations(home);
+    writeFile(config, JSON.stringify({ t3Url: "http://127.0.0.1:1" }));
+    const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
+    const result = runCliIn(
+      { cwd: repoDir(), env: { ...home, ...tokens } },
+      "run",
+      "--config",
+      config,
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`--config ${config} is the Global Config`);
+    expect(result.stderr).toContain("run `linear-t3 start` again");
+  });
+
+  test("the Local Config isn't looked for above the Git root", () => {
+    const parent = mkdtempSync(join(tmpdir(), "linear-t3-parent-"));
+    writeFile(join(parent, LOCAL), JSON.stringify({ project: "my-app", team: "ENG" }));
+    mkdirSync(join(parent, "repo", ".git"), { recursive: true });
+    const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
+    const result = runCliIn({ cwd: join(parent, "repo"), env: tokens }, "run", "--once");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `Missing "project": set it in the Local Config (${LOCAL} in the repository)`,
+    );
+  });
+
+  test("outside Git, only the working directory is checked for a Local Config", () => {
+    const parent = mkdtempSync(join(tmpdir(), "linear-t3-parent-"));
+    writeFile(join(parent, LOCAL), JSON.stringify({ project: "my-app", team: "ENG" }));
+    mkdirSync(join(parent, "sub"));
+    const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
+    const result = runCliIn({ cwd: join(parent, "sub"), env: tokens }, "run", "--once");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Missing "project"');
   });
 });
 
@@ -311,23 +429,24 @@ describe("cli setup", () => {
   const cleanup: (() => void)[] = [];
   afterEach(() => cleanup.splice(0).forEach((close) => close()));
 
-  test("writes a starter Config the Daemon accepts, then prints its path and the next steps", async () => {
+  test("writes a minimal Global Config a run accepts once a Local Config names the project and team", async () => {
     const home = homeDir();
     const { config } = locations(home);
     const result = runCliIn({ env: home }, "setup");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(result.stdout).toContain(config);
-    expect(result.stdout).toMatch(/edit .*projects/i);
+    expect(result.stdout).toContain(`Add a ${LOCAL} to your repository`);
     expect(result.stdout).toMatch(/linear-t3 connect[^]*linear-t3 start/);
 
     // With no matching issues, a dry run passes exactly when the Config loads and T3 answers.
     const linear = await fakeLinear([]);
-    const t3 = await fakeT3({ projects: [] });
+    const project = { id: "project-1", title: "my-app", workspaceRoot: "/work/my-app" };
+    const t3 = await fakeT3({ projects: [project] });
     cleanup.push(linear.close, t3.close);
     const starter = JSON.parse(readFileSync(config, "utf8"));
-    writeFileSync(config, JSON.stringify({ ...starter, t3: { url: t3.url } }));
+    writeFileSync(config, JSON.stringify({ ...starter, t3Url: t3.url }));
     const env = { ...home, LINEAR_API_URL: linear.url, LINEAR_API_KEY: "lin-key", T3_TOKEN: "t" };
-    const dryRun = await startCli({ cwd: home.HOME, env }, ["run", "--dry-run"]).result;
+    const dryRun = await startCli({ cwd: repoDir(), env }, ["run", "--dry-run"]).result;
     expect(dryRun).toMatchObject({ status: 0, stderr: "" });
     expect(dryRun.stdout).toContain("T3 has 0/4 running");
   });
@@ -342,20 +461,13 @@ describe("cli setup", () => {
     expect(readFileSync(config, "utf8")).toBe('{"mine":true}\n');
   });
 
-  test.each<{
-    case: string;
-    args: (path: string) => string[];
-    env: (path: string) => Record<string, string>;
-  }>([
-    { case: "--config", args: (path) => ["--config", path], env: () => ({}) },
-    { case: "LINEAR_T3_CONFIG", args: () => [], env: (path) => ({ LINEAR_T3_CONFIG: path }) },
-  ])("$case sets where it writes, creating missing directories", ({ args, env }) => {
+  test("LINEAR_T3_CONFIG sets where it writes, creating missing directories", () => {
     const home = homeDir();
     const path = join(home.HOME, "elsewhere", "nested", "mine.json");
-    const result = runCliIn({ env: { ...home, ...env(path) } }, "setup", ...args(path));
+    const result = runCliIn({ env: { ...home, LINEAR_T3_CONFIG: path } }, "setup");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(result.stdout).toContain(path);
-    expect(JSON.parse(readFileSync(path, "utf8"))).toHaveProperty("projects");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toHaveProperty("t3Url");
     expect(existsSync(locations(home).config)).toBe(false);
   });
 
@@ -418,12 +530,12 @@ describe("cli connect", () => {
     expect(existsSync(join(dir, ".env"))).toBe(false);
   });
 
-  test("connect t3 checks the token against t3.url from the XDG Config", async () => {
+  test("connect t3 checks the token against t3Url from the XDG Global Config", async () => {
     const t3 = await fakeT3({ projects: [] });
     cleanup.push(t3.close);
     const home = homeDir();
     const { config, credentials } = locations(home);
-    writeFile(config, JSON.stringify({ t3: { url: t3.url } }));
+    writeFile(config, JSON.stringify({ t3Url: t3.url }));
     // A stand-in `t3` CLI that issues a fixed token.
     const bin = mkdtempSync(join(tmpdir(), "linear-t3-bin-"));
     writeFileSync(join(bin, "t3"), "#!/bin/sh\necho t3-tok\n", { mode: 0o755 });
@@ -453,11 +565,15 @@ describe("cli run against fake Linear and T3", () => {
   ];
   const project = { id: "project-1", title: "my-app", workspaceRoot: "/work/my-app" };
 
-  /** Fake servers, plus a fresh home whose XDG Config points at them; `config` is merged in. */
+  /**
+   * Fake servers, a fresh home whose Global Config points at them with `global` merged in, and a
+   * repository to run in whose Local Config has `local` merged in.
+   */
   async function servers(
     t3Options: Partial<FakeT3Options> = {},
-    config = {},
+    global: Record<string, unknown> = {},
     linearIssues: FakeIssue[] = issues,
+    local: Record<string, unknown> = {},
   ) {
     const linear = await fakeLinear(linearIssues);
     const t3 = await fakeT3({ projects: [project], ...t3Options });
@@ -467,18 +583,15 @@ describe("cli run against fake Linear and T3", () => {
     writeFile(
       files.config,
       JSON.stringify({
-        projects: { "my-app": { linear: { team: "ENG" } } },
-        t3: { url: t3.url },
-        pollIntervalSeconds: 10,
-        defaults: {
-          model: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
-          linear: { onLaunch: { comment: false } },
-        },
-        ...config,
+        t3Url: t3.url,
+        pollInterval: 10,
+        model: "claude-opus-5-5",
+        provider: "claudeAgent",
+        comment: false,
+        ...global,
       }),
     );
-    // Run from elsewhere, so nothing can depend on the current directory.
-    const dir = mkdtempSync(join(tmpdir(), "linear-t3-cwd-"));
+    const dir = repoDir(local);
     const env = {
       ...home,
       LINEAR_API_URL: linear.url,
@@ -517,7 +630,7 @@ describe("cli run against fake Linear and T3", () => {
     expect(launchedIds(files.state)).toEqual(["issue-1", "issue-2"]);
   });
 
-  test("a relative stateFile resolves against the Config's directory", async () => {
+  test("a relative stateFile resolves against the Global Config's directory", async () => {
     const { dir, env, files } = await servers({}, { stateFile: "data/state.json" });
     const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
     expect(result).toMatchObject({ status: 0, stderr: "" });
@@ -527,6 +640,146 @@ describe("cli run against fake Linear and T3", () => {
     ]);
     expect(existsSync(join(dir, "data"))).toBe(false);
     expect(existsSync(files.state)).toBe(false);
+  });
+
+  test("polls the Local Config's team and launches into its T3 project", async () => {
+    const other = { id: "project-0", title: "other", workspaceRoot: "/work/other" };
+    const { linear, t3, dir, env } = await servers(
+      { projects: [other, project] },
+      {},
+      [...issues, { id: "ops-1", identifier: "OPS-1", title: "Ops", team: "OPS" }],
+      { filter: { state: { type: { eq: "unstarted" } } } },
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).toContain("watching ENG -> my-app");
+    expect(linear.filters).toEqual([
+      { and: [{ team: { key: { eq: "ENG" } } }, { state: { type: { eq: "unstarted" } } }] },
+    ]);
+    expect(t3.launches.map((launch) => [launch.title, launch.projectId])).toEqual([
+      ["ENG-1: First", "project-1"],
+      ["ENG-2: Second", "project-1"],
+    ]);
+  });
+
+  test("each key takes the Local value, else the Global one, else the built-in default", async () => {
+    const { t3, dir, env } = await servers(
+      {},
+      { prompt: "Global {identifier}", runtimeMode: "approval-required", baseRef: "develop" },
+      [issues[0]!],
+      { prompt: "Local {identifier}" },
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches).toHaveLength(1);
+    expect(t3.launches[0]).toMatchObject({
+      initialMessage: { text: "Local ENG-1" },
+      runtimeMode: "approval-required",
+      modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+      workspaceStrategy: {
+        type: "worktree",
+        baseRef: "develop",
+        startFromOrigin: true,
+        branch: "eng-1",
+      },
+    });
+  });
+
+  test("built-in defaults apply when neither Config sets a key", async () => {
+    const { t3, dir, env } = await servers({}, {}, [issues[0]!]);
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches[0]).toMatchObject({
+      initialMessage: {
+        text: "Work on Linear issue ENG-1: First\n\nhttps://linear.app/acme/issue/ENG-1\n\n",
+      },
+      runtimeMode: "full-access",
+      workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: true },
+    });
+  });
+
+  test("workspace local launches in the project's own checkout", async () => {
+    const { t3, dir, env } = await servers({}, { workspace: "local" }, [issues[0]!]);
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches[0]!.workspaceStrategy).toEqual({ type: "root" });
+  });
+
+  test("without a model, threads use the T3 project's default model, options included", async () => {
+    const defaultModelSelection = {
+      instanceId: "codex",
+      model: "gpt-5.5",
+      options: { effort: "high" },
+    };
+    const { t3, dir, env } = await servers(
+      { projects: [{ ...project, defaultModelSelection }] },
+      { model: undefined, provider: undefined },
+      [issues[0]!],
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches[0]!.modelSelection).toEqual(defaultModelSelection);
+  });
+
+  test("a model without a provider runs on the Provider of the T3 project's default model", async () => {
+    const defaultModelSelection = { instanceId: "claudeAgent", model: "claude-opus-5-5" };
+    const { t3, dir, env } = await servers(
+      { projects: [{ ...project, defaultModelSelection }] },
+      { provider: undefined },
+      [issues[0]!],
+      { model: "claude-sonnet-5-5" },
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches[0]!.modelSelection).toEqual({
+      instanceId: "claudeAgent",
+      model: "claude-sonnet-5-5",
+    });
+  });
+
+  test("the Local Config is found from a subdirectory of the repository", async () => {
+    const { t3, dir, env } = await servers();
+    const sub = join(dir, "packages", "web");
+    mkdirSync(sub, { recursive: true });
+    const result = await startCli({ cwd: sub, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches).toHaveLength(2);
+  });
+
+  test("a relative project path resolves against the Local Config's folder", async () => {
+    const projects: FakeT3Options["projects"] = [];
+    const { t3, dir, env } = await servers({ projects }, {}, issues, { project: "." });
+    projects.push({ id: "repo", title: "repo", workspaceRoot: dir });
+    const sub = join(dir, "src");
+    mkdirSync(sub);
+    const result = await startCli({ cwd: sub, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches.map((launch) => launch.projectId)).toEqual(["repo", "repo"]);
+  });
+
+  test("--config replaces the discovered Local Config", async () => {
+    // The discovered one names a project T3 doesn't have.
+    const { t3, dir, env } = await servers({}, {}, issues, { project: "missing" });
+    writeFile(
+      join(dir, "configs", "bugs.json"),
+      JSON.stringify({ project: "my-app", team: "ENG" }),
+    );
+    const result = await startCli({ cwd: dir, env }, [
+      "run",
+      "--once",
+      "--config",
+      "configs/bugs.json",
+    ]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches).toHaveLength(2);
+  });
+
+  test("a project T3 doesn't have fails the poll and exits non-zero", async () => {
+    const { t3, dir, env } = await servers({}, {}, issues, { project: "missing" });
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('No T3 project matches "missing"');
+    expect(t3.launches).toEqual([]);
   });
 
   test("--dry-run lists the matching issues, starts no threads and exits 0", async () => {
@@ -599,24 +852,6 @@ describe("cli run against fake Linear and T3", () => {
     expect(order).toEqual(["ENG-1", "ENG-2"]);
   });
 
-  test("launches alternate between projects, whatever their priorities", async () => {
-    const t3Projects = ["web", "ops"].map((title) => ({
-      id: title,
-      title,
-      workspaceRoot: `/work/${title}`,
-    }));
-    const config = {
-      projects: { web: { linear: { team: "WEB" } }, ops: { linear: { team: "OPS" } } },
-    };
-    const order = await launchOrder({ projects: t3Projects }, config, [
-      { id: "web-1", identifier: "WEB-1", title: "Web urgent", priority: 1, team: "WEB" },
-      { id: "web-2", identifier: "WEB-2", title: "Web high", priority: 2, team: "WEB" },
-      { id: "ops-1", identifier: "OPS-1", title: "Ops low", priority: 4, team: "OPS" },
-      { id: "ops-2", identifier: "OPS-2", title: "Ops none", priority: 0, team: "OPS" },
-    ]);
-    expect(order).toEqual(["WEB-1", "OPS-1", "WEB-2", "OPS-2"]);
-  });
-
   test("launches every matching issue in one poll when no cap is set", async () => {
     const { t3, dir, env, files } = await servers({}, {}, [
       ...issues,
@@ -638,16 +873,8 @@ describe("cli run against fake Linear and T3", () => {
     expect(t3.launches.map((launch) => launch.interactionMode)).toEqual(["default", "default"]);
   });
 
-  test("the Linear comment links the thread under t3.url", async () => {
-    const { linear, t3, dir, env } = await servers(
-      {},
-      {
-        defaults: {
-          model: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
-          linear: { onLaunch: { comment: true } },
-        },
-      },
-    );
+  test("the Linear comment links the thread under t3Url", async () => {
+    const { linear, t3, dir, env } = await servers({}, { comment: true });
     const t3Home = mkdtempSync(join(tmpdir(), "linear-t3-t3home-"));
     writeFile(join(t3Home, "userdata", "environment-id"), "env-1\n");
     const result = await startCli({ cwd: dir, env: { ...env, T3CODE_HOME: t3Home } }, [
@@ -664,15 +891,7 @@ describe("cli run against fake Linear and T3", () => {
   });
 
   test("without T3's environment id on this machine, the Linear comment names the thread", async () => {
-    const { linear, t3, dir, env } = await servers(
-      {},
-      {
-        defaults: {
-          model: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
-          linear: { onLaunch: { comment: true } },
-        },
-      },
-    );
+    const { linear, t3, dir, env } = await servers({}, { comment: true });
     const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(linear.comments.map((c) => c.body)).toEqual(
@@ -871,31 +1090,17 @@ describe("cli run against fake Linear and T3", () => {
       expect(t3.launches).toHaveLength(launches);
     });
 
-    test("--dry-run reports a model-less project as failing without taking a slot", async () => {
-      const infra = { id: "project-2", title: "infra", workspaceRoot: "/work/infra" };
+    test("--dry-run reports issues as failing without a model, without taking a slot", async () => {
       const { t3, dir, env } = await servers(
-        { projects: [project, infra] },
-        {
-          maxRunningThreads: 1,
-          defaults: { linear: { onLaunch: { comment: false } } },
-          projects: {
-            "my-app": { linear: { team: "ENG" } },
-            infra: {
-              linear: { team: "OPS" },
-              model: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
-            },
-          },
-        },
-        [
-          { id: "issue-1", identifier: "ENG-1", title: "First", team: "ENG" },
-          { id: "ops-1", identifier: "OPS-1", title: "Ops first", team: "OPS" },
-        ],
+        {},
+        { maxRunningThreads: 1, model: undefined, provider: undefined },
       );
       const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
       expect(result).toMatchObject({ status: 0, stderr: "" });
       expect(result.stdout).toContain("T3 has 0/1 running");
-      expect(result.stdout).toContain('ENG-1 would fail: No model configured for project "my-app"');
-      expect(result.stdout).toContain("OPS-1 would start");
+      const reason = 'No model configured and T3 project "my-app" has no default model';
+      expect(result.stdout).toContain(`ENG-1 would fail: ${reason}`);
+      expect(result.stdout).toContain(`ENG-2 would fail: ${reason}`);
       expect(t3.launches).toEqual([]);
     });
   });
@@ -916,7 +1121,9 @@ describe("cli run against fake Linear and T3", () => {
 /** What both background service suites hand `startAndInstalledChecks`. */
 interface ServiceSetup {
   env: Record<string, string>;
-  files: { config: string; credentials: string; unit: string };
+  /** The repository `start` runs in, holding the Local Config. */
+  dir: string;
+  files: { config: string; local: string; credentials: string; unit: string };
   cli: (...args: string[]) => ReturnType<typeof startCli>["result"];
   /** Every call the stand-in service manager got. */
   calls: () => string[];
@@ -930,11 +1137,15 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
     env?: Record<string, string>;
     fix: RegExp;
   }>([
-    { case: "no Config", breaks: (f) => rmSync(f.config!), fix: /linear-t3 setup/ },
     {
-      case: "an invalid Config",
-      breaks: (f) => writeFile(f.config!, "{}"),
-      fix: /Invalid config[\s\S]*fix it, then run `linear-t3 start` again/,
+      case: "no Local Config",
+      breaks: (f) => rmSync(f.local!),
+      fix: /Missing "project"[\s\S]*fix it, then run `linear-t3 start` again/,
+    },
+    {
+      case: "an invalid Global Config",
+      breaks: (f) => writeFile(f.config!, JSON.stringify({ team: "ENG" })),
+      fix: /Invalid config[\s\S]*team: only goes in a Local Config[\s\S]*fix it, then run `linear-t3 start` again/,
     },
     {
       case: "no Linear key",
@@ -963,10 +1174,9 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
       fix: /rejected the token.*\n.*run `linear-t3 connect t3`/,
     },
   ])("start with $case exits non-zero with the fix and installs nothing", async (failure) => {
-    const { env, files, calls } = await service();
+    const { env, dir, files, calls } = await service();
     failure.breaks(files);
-    const result = await startCli({ cwd: tmpdir(), env: { ...env, ...failure.env } }, ["start"])
-      .result;
+    const result = await startCli({ cwd: dir, env: { ...env, ...failure.env } }, ["start"]).result;
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(failure.fix);
     expect(existsSync(files.unit)).toBe(false);
@@ -975,11 +1185,7 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
 
   test("start with T3 down exits non-zero and installs nothing", async () => {
     const { files, cli, calls } = await service();
-    const config = {
-      projects: { a: { linear: { team: "ENG" } } },
-      t3: { url: "http://127.0.0.1:1" },
-    };
-    writeFile(files.config, JSON.stringify(config));
+    writeFile(files.config, JSON.stringify({ t3Url: "http://127.0.0.1:1" }));
     const result = await cli("start");
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("T3 not reachable at http://127.0.0.1:1");
@@ -988,12 +1194,12 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
   });
 
   test("start from the npx cache refuses and says to install globally", async () => {
-    const { env, files, calls } = await service();
+    const { env, dir, files, calls } = await service();
     // Where npx puts a package it runs without installing it.
     const npxCli = join(mkdtempSync(join(tmpdir(), "linear-t3-npm-")), "_npx", "1a2b", "cli.ts");
     mkdirSync(dirname(npxCli), { recursive: true });
     symlinkSync(cliPath, npxCli);
-    const result = await startCli({ cwd: tmpdir(), env, cli: npxCli }, ["start"]).result;
+    const result = await startCli({ cwd: dir, env, cli: npxCli }, ["start"]).result;
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("npm i -g linear-t3");
     expect(existsSync(files.unit)).toBe(false);
@@ -1032,18 +1238,14 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
     const t3 = await fakeT3({ projects: [], token: "t3-tok" });
     cleanup.push(linear.close, t3.close);
     const home = homeDir();
+    const dir = repoDir();
     const files = {
       ...locations(home),
       log: join(home.XDG_STATE_HOME, "linear-t3", "daemon.log"),
       unit: join(home.HOME, "Library", "LaunchAgents", "linear-t3.plist"),
+      local: join(dir, LOCAL),
     };
-    writeFile(
-      files.config,
-      JSON.stringify({
-        projects: { "my-app": { linear: { team: "ENG" } } },
-        t3: { url: t3.url },
-      }),
-    );
+    writeFile(files.config, JSON.stringify({ t3Url: t3.url }));
     writeFile(files.credentials, "LINEAR_API_KEY=lin-key\nT3_TOKEN=t3-tok\n");
     const bin = mkdtempSync(join(tmpdir(), "linear-t3-bin-"));
     const calls = join(bin, "calls");
@@ -1062,11 +1264,11 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
       { mode: 0o755 },
     );
     const env = { ...home, LINEAR_API_URL: linear.url, PATH: `${bin}:${process.env.PATH}` };
-    const dir = mkdtempSync(join(tmpdir(), "linear-t3-cwd-"));
     const recorded = () =>
       existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [];
     return {
       env,
+      dir,
       files,
       cli: (...args: string[]) => startCli({ cwd: dir, env }, args).result,
       calls: recorded,
@@ -1090,7 +1292,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
     `${target} = {\n\tactive count = 1\n\tpath = /x/linear-t3.plist\n\t${details}\n}\n`;
 
   /** The agent `start` should write for `files`, with `env` as its environment. */
-  function expectedAgent(files: { config: string; log: string }, env: Record<string, string>) {
+  function expectedAgent(files: { local: string; log: string }, env: Record<string, string>) {
     const variables = Object.entries(env)
       .map(([key, value]) => `\t\t<key>${key}</key>\n\t\t<string>${value}</string>\n`)
       .join("");
@@ -1106,7 +1308,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
 \t\t<string>${cliPath}</string>
 \t\t<string>run</string>
 \t\t<string>--config</string>
-\t\t<string>${files.config}</string>
+\t\t<string>${files.local}</string>
 \t</array>
 \t<key>EnvironmentVariables</key>
 \t<dict>
@@ -1169,10 +1371,10 @@ ${variables}\t</dict>
   });
 
   test("the agent gets T3CODE_HOME and LINEAR_T3_CONFIG when set, and never the tokens", async () => {
-    const { env, files } = await service();
+    const { env, dir, files } = await service();
     const t3Home = mkdtempSync(join(tmpdir(), "linear-t3-t3home-"));
     const { status } = await startCli(
-      { cwd: tmpdir(), env: { ...env, T3CODE_HOME: t3Home, LINEAR_T3_CONFIG: files.config } },
+      { cwd: dir, env: { ...env, T3CODE_HOME: t3Home, LINEAR_T3_CONFIG: files.config } },
       ["start"],
     ).result;
     expect(status).toBe(0);
@@ -1187,10 +1389,9 @@ ${variables}\t</dict>
   });
 
   test("tokens from the environment stay out of the agent", async () => {
-    const { env, files } = await service();
+    const { env, dir, files } = await service();
     const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
-    const { status } = await startCli({ cwd: tmpdir(), env: { ...env, ...tokens } }, ["start"])
-      .result;
+    const { status } = await startCli({ cwd: dir, env: { ...env, ...tokens } }, ["start"]).result;
     expect(status).toBe(0);
     const agent = readFileSync(files.unit, "utf8");
     expect(agent).not.toContain("lin-key");
@@ -1359,17 +1560,13 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
     const t3 = await fakeT3({ projects: [], token: "t3-tok" });
     cleanup.push(linear.close, t3.close);
     const home = homeDir();
+    const dir = repoDir();
     const files = {
       ...locations(home),
       unit: join(home.XDG_CONFIG_HOME, "systemd", "user", "linear-t3.service"),
+      local: join(dir, LOCAL),
     };
-    writeFile(
-      files.config,
-      JSON.stringify({
-        projects: { "my-app": { linear: { team: "ENG" } } },
-        t3: { url: t3.url },
-      }),
-    );
+    writeFile(files.config, JSON.stringify({ t3Url: t3.url }));
     writeFile(files.credentials, "LINEAR_API_KEY=lin-key\nT3_TOKEN=t3-tok\n");
     const bin = mkdtempSync(join(tmpdir(), "linear-t3-bin-"));
     const calls = join(bin, "calls");
@@ -1397,9 +1594,9 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
     );
     stub("loginctl", `if [ -f "${linger}" ]; then echo yes; else echo no; fi`);
     const env = { ...home, LINEAR_API_URL: linear.url, PATH: `${bin}:${process.env.PATH}` };
-    const dir = mkdtempSync(join(tmpdir(), "linear-t3-cwd-"));
     return {
       env,
+      dir,
       files,
       cli: (...args: string[]) => startCli({ cwd: dir, env }, args).result,
       calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []),
@@ -1410,7 +1607,7 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
   }
 
   /** The unit `start` should write for `files`, with `env` as its environment. */
-  function expectedUnit(files: { config: string }, env: Record<string, string>) {
+  function expectedUnit(files: { local: string }, env: Record<string, string>) {
     const variables = Object.entries(env)
       .map(([key, value]) => `Environment="${key}=${value}"\n`)
       .join("");
@@ -1418,7 +1615,7 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
 Description=linear-t3 Daemon
 
 [Service]
-ExecStart="${process.execPath}" "${cliPath}" "run" "--config" "${files.config}"
+ExecStart="${process.execPath}" "${cliPath}" "run" "--config" "${files.local}"
 ${variables}Restart=on-failure
 RestartSec=10
 TimeoutStopSec=30
@@ -1476,12 +1673,12 @@ WantedBy=default.target
   });
 
   test("the unit gets T3CODE_HOME and LINEAR_T3_CONFIG when set, and never the tokens", async () => {
-    const { env, files } = await service();
+    const { env, dir, files } = await service();
     const t3Home = mkdtempSync(join(tmpdir(), "linear-t3-t3home-"));
     const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
     const { status } = await startCli(
       {
-        cwd: tmpdir(),
+        cwd: dir,
         env: { ...env, ...tokens, T3CODE_HOME: t3Home, LINEAR_T3_CONFIG: files.config },
       },
       ["start"],
@@ -1500,8 +1697,20 @@ WantedBy=default.target
     expect(unit).not.toContain("t3-tok");
   });
 
-  test("without XDG variables the unit goes in ~/.config and gets no environment", async () => {
+  test("a relative LINEAR_T3_CONFIG is pinned as an absolute path", async () => {
     const { env, files } = await service();
+    const { status } = await startCli(
+      { cwd: dirname(files.config), env: { ...env, LINEAR_T3_CONFIG: "config.json" } },
+      ["start", "--config", files.local],
+    ).result;
+    expect(status).toBe(0);
+    expect(readFileSync(files.unit, "utf8")).toContain(
+      `Environment="LINEAR_T3_CONFIG=${files.config}"\n`,
+    );
+  });
+
+  test("without XDG variables the unit goes in ~/.config and gets no environment", async () => {
+    const { env, dir, files } = await service();
     const home = { HOME: env.HOME, LINEAR_API_URL: env.LINEAR_API_URL, PATH: env.PATH };
     const config = join(env.HOME, ".config", "linear-t3", "config.json");
     writeFile(config, readFileSync(files.config, "utf8"));
@@ -1509,21 +1718,21 @@ WantedBy=default.target
       join(env.HOME, ".config", "linear-t3", "credentials"),
       readFileSync(files.credentials, "utf8"),
     );
-    const { status } = await startCli({ cwd: tmpdir(), env: home }, ["start"]).result;
+    const { status } = await startCli({ cwd: dir, env: home }, ["start"]).result;
     expect(status).toBe(0);
     expect(
       readFileSync(join(env.HOME, ".config", "systemd", "user", "linear-t3.service"), "utf8"),
-    ).toBe(expectedUnit({ config }, {}));
+    ).toBe(expectedUnit(files, {}));
   });
 
   test("the unit escapes paths so systemd reads them back as written", async () => {
     const { env, files } = await service();
-    // A Config path with a space, a quote, a backslash and the characters systemd would otherwise
-    // expand.
+    // A Local Config path with a space, a quote, a backslash and the characters systemd would
+    // otherwise expand.
     const dir = mkdtempSync(join(tmpdir(), "linear-t3-odd-"));
     const config = join(dir, 'my "100%" $HOME\\x', "c.json");
-    writeFile(config, readFileSync(files.config, "utf8"));
-    const { status } = await startCli({ cwd: tmpdir(), env }, ["--config", config, "start"]).result;
+    writeFile(config, readFileSync(files.local, "utf8"));
+    const { status } = await startCli({ cwd: tmpdir(), env }, ["start", "--config", config]).result;
     expect(status).toBe(0);
     expect(readFileSync(files.unit, "utf8")).toContain(
       `"--config" "${dir}/my \\"100%%\\" $$HOME\\\\x/c.json"\n`,

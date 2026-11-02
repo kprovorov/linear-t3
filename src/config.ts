@@ -1,121 +1,12 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 
 export const DEFAULT_T3_URL = "http://127.0.0.1:3773";
 
-// A raw Linear `IssueFilter` object, passed through to the Linear API as-is.
-// See https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter
-const IssueFilter = z.record(z.string(), z.unknown());
-
-const ModelSelection = z.object({
-  instanceId: z.string(),
-  model: z.string(),
-  options: z.unknown().optional(),
-});
-
-const WorkspaceStrategy = z.discriminatedUnion("type", [
-  // Run the thread in the project's main checkout.
-  z.object({ type: z.literal("root") }),
-  // Create a new git worktree per issue, on the issue's Linear branch name.
-  z.object({
-    type: z.literal("worktree"),
-    baseRef: z.string().default("main"),
-    startFromOrigin: z.boolean().default(true),
-  }),
-]);
-
-const OnLaunch = z.object({
-  // Workflow state name to move the issue to once its thread is started.
-  moveToState: z.string().optional(),
-  comment: z.boolean().optional(),
-});
-
-// How threads are started. Every field can be set in `defaults` and overridden per project.
-const ThreadSettings = z.object({
-  workspace: WorkspaceStrategy.optional(),
-  runtimeMode: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]).optional(),
-  // Unset everywhere means the T3 project's default model.
-  model: ModelSelection.optional(),
-  promptTemplate: z.string().optional(),
-});
-
-// Settings shared by every project. A project's own value wins; nested objects (`workspace`, `model`,
-// `linear.filter`) are replaced as a whole, while `linear.onLaunch` is merged key by key.
-const Defaults = ThreadSettings.extend({
-  linear: z.object({ filter: IssueFilter.optional(), onLaunch: OnLaunch.optional() }).optional(),
-});
-
-// Which Linear issues go to one T3 project, and how their threads are started.
-const ProjectEntry = ThreadSettings.extend({
-  linear: z.object({
-    // Linear team key, e.g. "ENG".
-    team: z.string(),
-    // Linear `IssueFilter`, AND-ed with the team filter. Only matching issues get a thread.
-    filter: IssueFilter.optional(),
-    onLaunch: OnLaunch.optional(),
-  }),
-});
-
-// A project entry merged with `defaults`, with built-in defaults filling whatever is still unset.
-const ProjectSettings = z.object({
-  linear: z.object({
-    team: z.string(),
-    filter: IssueFilter.optional(),
-    onLaunch: z
-      .object({ moveToState: z.string().optional(), comment: z.boolean().default(true) })
-      .prefault({}),
-  }),
-  workspace: WorkspaceStrategy.default({
-    type: "worktree",
-    baseRef: "main",
-    startFromOrigin: true,
-  }),
-  runtimeMode: ThreadSettings.shape.runtimeMode.unwrap().default("full-access"),
-  model: ModelSelection.optional(),
-  promptTemplate: z.string().optional(),
-});
-
-const Config = z
-  .object({
-    pollIntervalSeconds: z.number().int().min(10).default(60),
-    // Caps Running threads across all of T3, including threads started by hand. Unset means no cap.
-    maxRunningThreads: z.number().int().min(0).optional(),
-    // Relative to the Config file's directory. Unset means the XDG State location.
-    stateFile: z.string().optional(),
-    t3: z.object({ url: z.string().url().default(DEFAULT_T3_URL) }).prefault({}),
-    defaults: Defaults.prefault({}),
-    // Keyed by T3 project id, title, or workspace root path.
-    projects: z
-      .record(z.string(), ProjectEntry)
-      .refine((p) => Object.keys(p).length > 0, "Define at least one project"),
-  })
-  .transform(({ defaults, projects, ...rest }) => ({
-    ...rest,
-    projects: Object.fromEntries(
-      Object.entries(projects).map(([ref, p]) => [ref, resolveProject(defaults, p)]),
-    ),
-  }));
-
-function resolveProject(
-  defaults: z.infer<typeof Defaults>,
-  project: z.infer<typeof ProjectEntry>,
-): ProjectSettings {
-  const { linear: sharedLinear, ...sharedThread } = defaults;
-  const { linear, ...thread } = project;
-  return ProjectSettings.parse({
-    ...sharedThread,
-    ...thread,
-    linear: {
-      team: linear.team,
-      filter: linear.filter ?? sharedLinear?.filter,
-      onLaunch: { ...sharedLinear?.onLaunch, ...linear.onLaunch },
-    },
-  });
-}
-
-export type Config = z.infer<typeof Config>;
-export type ProjectSettings = z.infer<typeof ProjectSettings>;
-export type ModelSelection = z.infer<typeof ModelSelection>;
+/** The Local Config's file name, found from the working directory up to the Git root. */
+export const LOCAL_CONFIG_NAME = "linear-t3.config.json";
 
 export const DEFAULT_PROMPT = `Work on Linear issue {identifier}: {title}
 
@@ -123,46 +14,378 @@ export const DEFAULT_PROMPT = `Work on Linear issue {identifier}: {title}
 
 {description}`;
 
-// Settings that no longer exist. Rejected rather than ignored: dropping a cap or a mode silently
-// would change what gets launched, and how.
-const REMOVED = {
-  maxLaunchesPerPoll: "use maxRunningThreads to cap Running threads across T3",
-  "t3.webUrl": "the Linear comment links the thread under t3.url",
-  maxRunningThreads: "only the top-level maxRunningThreads remains",
-  interactionMode: "threads always start in T3's default interaction mode",
-};
+/**
+ * Where a key may be set. `global`: only the Global Config (machine settings). `local`: only the
+ * Local Config, as it says what to watch. `all`: any layer.
+ */
+export type Scope = "global" | "local" | "all";
 
-function removedKeys(raw: unknown): string[] {
-  if (typeof raw !== "object" || raw === null) return [];
-  const r = raw as Record<string, Record<string, unknown> | undefined>;
-  const isObject = (v: unknown): v is Record<string, unknown> =>
-    typeof v === "object" && v !== null;
-  const found: string[] = [];
-  if ("maxLaunchesPerPoll" in r) found.push(`maxLaunchesPerPoll: ${REMOVED.maxLaunchesPerPoll}`);
-  if (isObject(r.t3) && "webUrl" in r.t3) found.push(`t3.webUrl: ${REMOVED["t3.webUrl"]}`);
-  const scopes: [string, unknown][] = [["defaults", r.defaults]];
-  if (isObject(r.projects)) {
-    for (const [ref, entry] of Object.entries(r.projects)) scopes.push([`projects.${ref}`, entry]);
-  }
-  for (const [where, settings] of scopes) {
-    if (!isObject(settings)) continue;
-    for (const key of ["maxRunningThreads", "interactionMode"] as const) {
-      if (key in settings) found.push(`${where}.${key}: ${REMOVED[key]}`);
-    }
-  }
-  return found;
+/** How a key's value is written, so that a flag can be generated from it. */
+export type KeyType = "string" | "boolean" | "integer" | "json";
+
+interface KeyDeclaration<S extends z.ZodType = z.ZodType> {
+  type: KeyType;
+  scope: Scope;
+  schema: S;
+  /** The built-in default, used when no layer sets the key. */
+  fallback?: z.output<S>;
+  description: string;
 }
 
-export async function loadConfig(path: string): Promise<Config> {
-  const raw = JSON.parse(await readFile(path, "utf8"));
-  const removed = removedKeys(raw);
-  if (removed.length > 0) {
-    const lines = removed.map((line) => `  ✖ ${line}`).join("\n");
-    throw new Error(`Invalid config ${path}: remove settings that no longer exist:\n${lines}`);
+const declare = <S extends z.ZodType>(declaration: KeyDeclaration<S>) => declaration;
+
+/**
+ * Every Config key, declared once. Scope checks, defaults and validation come from here, and so
+ * will the CLI flags: each key's flag is its name in kebab-case.
+ */
+export const KEYS = {
+  project: declare({
+    type: "string",
+    scope: "local",
+    schema: z.string().min(1),
+    description:
+      "the T3 project to launch threads in: its id, folder path (relative to this file) or unique title",
+  }),
+  team: declare({
+    type: "string",
+    scope: "local",
+    schema: z.string().min(1),
+    description: 'the Linear team key whose issues to watch, e.g. "ENG"',
+  }),
+  filter: declare({
+    type: "json",
+    scope: "local",
+    // A raw Linear `IssueFilter`, ANDed with the team and passed to the Linear API as-is. See
+    // https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter
+    schema: z.record(z.string(), z.unknown()),
+    description: "a Linear IssueFilter that issues must also match",
+  }),
+  setStatus: declare({
+    type: "string",
+    scope: "local",
+    schema: z.string().min(1),
+    description: "the workflow status to move an issue to once its thread starts",
+  }),
+  comment: declare({
+    type: "boolean",
+    scope: "all",
+    schema: z.boolean(),
+    fallback: true,
+    description: "comment on the Linear issue with a link to its thread",
+  }),
+  model: declare({
+    type: "string",
+    scope: "all",
+    schema: z.string().min(1),
+    description: "the exact model id threads run on (default: the T3 project's default model)",
+  }),
+  provider: declare({
+    type: "string",
+    scope: "all",
+    schema: z.string().min(1),
+    description:
+      "the T3 Provider instance id for `model` (default: the Provider of the T3 project's default model)",
+  }),
+  runtimeMode: declare({
+    type: "string",
+    scope: "all",
+    schema: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]),
+    fallback: "full-access",
+    description: "the T3 runtime mode threads start in",
+  }),
+  workspace: declare({
+    type: "string",
+    scope: "all",
+    schema: z.enum(["local", "worktree"]),
+    fallback: "worktree",
+    description:
+      "`worktree`: a new Git worktree per issue, on its Linear branch; `local`: the project's own checkout",
+  }),
+  baseRef: declare({
+    type: "string",
+    scope: "all",
+    schema: z.string().min(1),
+    fallback: "main",
+    description: "the ref new worktrees branch from",
+  }),
+  startFromOrigin: declare({
+    type: "boolean",
+    scope: "all",
+    schema: z.boolean(),
+    fallback: true,
+    description: "branch new worktrees from the remote's `baseRef`",
+  }),
+  prompt: declare({
+    type: "string",
+    scope: "all",
+    schema: z.string().min(1),
+    fallback: DEFAULT_PROMPT,
+    description:
+      "the first message of each thread; {identifier}, {title}, {url}, {description} and {branchName} are filled in",
+  }),
+  pollInterval: declare({
+    type: "integer",
+    scope: "all",
+    schema: z.number().int().min(10),
+    fallback: 60,
+    description: "seconds between polls of Linear",
+  }),
+  maxRunningThreads: declare({
+    type: "integer",
+    scope: "global",
+    schema: z.number().int().min(0),
+    description:
+      "the most Running threads T3 may have before launches wait; unset means no cap, 0 pauses launches",
+  }),
+  t3Url: declare({
+    type: "string",
+    scope: "global",
+    schema: z.string().url(),
+    fallback: DEFAULT_T3_URL,
+    description: "the T3 Code server, also used for thread links",
+  }),
+  stateFile: declare({
+    type: "string",
+    scope: "global",
+    schema: z.string().min(1),
+    description: "where State is kept, relative to the Global Config (default: XDG state)",
+  }),
+} satisfies Record<string, KeyDeclaration>;
+
+export type Key = keyof typeof KEYS;
+type Value<K extends Key> = z.output<(typeof KEYS)[K]["schema"]>;
+type Values = { [K in Key]?: Value<K> };
+
+/** One Config file and the keys it sets. */
+interface Layer {
+  path: string;
+  values: Values;
+}
+
+/** The effective Config for a run: every key resolved, plus where the files are. */
+export interface Config {
+  project: string;
+  /** The folder a relative `project` path resolves against: that of the file that set it. */
+  projectBase: string;
+  team: string;
+  filter?: Value<"filter">;
+  setStatus?: string;
+  comment: boolean;
+  model?: string;
+  provider?: string;
+  runtimeMode: Value<"runtimeMode">;
+  workspace: Value<"workspace">;
+  baseRef: string;
+  startFromOrigin: boolean;
+  prompt: string;
+  pollInterval: number;
+  maxRunningThreads?: number;
+  t3Url: string;
+  /** Absolute. */
+  stateFile: string;
+  files: { global: string; local?: string };
+}
+
+const isKey = (key: string): key is Key => Object.hasOwn(KEYS, key);
+
+// Keys of the old nested Config that became a flat key under another name.
+const RENAMED: Record<string, string> = {
+  moveToState: "setStatus",
+  promptTemplate: "prompt",
+  pollIntervalSeconds: "pollInterval",
+  t3: "t3Url",
+  linear: "team, filter, setStatus and comment",
+  onLaunch: "setStatus and comment",
+};
+
+const MIGRATION = [
+  "The Config is now flat, one T3 project per run. Rewrite it as:",
+  `  - the Global Config: t3Url, maxRunningThreads, stateFile and any shared defaults`,
+  `  - a ${LOCAL_CONFIG_NAME} in each repository: project, team, filter, setStatus`,
+  "Renamed keys:",
+  "  linear.team → team, linear.filter → filter",
+  "  linear.onLaunch.moveToState → setStatus, linear.onLaunch.comment → comment",
+  "  promptTemplate → prompt, pollIntervalSeconds → pollInterval, t3.url → t3Url",
+  '  workspace.type "root" → workspace "local", workspace.type "worktree" → workspace "worktree"',
+  "  workspace.baseRef → baseRef, workspace.startFromOrigin → startFromOrigin",
+  "  model.instanceId → provider, model.model → model",
+].join("\n");
+
+export class ConfigError extends Error {}
+
+const describeScope = (scope: Scope, globalPath: string) =>
+  scope === "global"
+    ? `the Global Config (${globalPath})`
+    : `a Local Config (${LOCAL_CONFIG_NAME} in the repository, or --config)`;
+
+/** Reads one Config file. A missing file is `undefined`; anything else wrong is a `ConfigError`. */
+async function readLayer(
+  path: string,
+  which: "global" | "local",
+  globalPath: string,
+): Promise<Layer | undefined> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new ConfigError(`Could not read config ${path}: ${(error as Error).message}`);
   }
-  const result = Config.safeParse(raw);
-  if (!result.success) {
-    throw new Error(`Invalid config ${path}:\n${z.prettifyError(result.error)}`);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new ConfigError(`Invalid config ${path}: ${(error as Error).message}`);
   }
-  return result.data;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConfigError(`Invalid config ${path}: expected a JSON object`);
+  }
+  if ("projects" in raw || "defaults" in raw) {
+    throw new ConfigError(
+      `Invalid config ${path}: "projects" and "defaults" are the old Config shape.\n${MIGRATION}`,
+    );
+  }
+
+  const problems: string[] = [];
+  // Whether anything looks like the old nested Config, which earns the migration hint.
+  let old = false;
+  const values: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!isKey(key)) {
+      const renamed = RENAMED[key];
+      old ||= renamed !== undefined;
+      problems.push(
+        renamed
+          ? `${key}: renamed to ${renamed.includes(" ") ? renamed : `"${renamed}"`}`
+          : `${key}: unknown key, remove it or fix its name`,
+      );
+      continue;
+    }
+    const { scope, schema } = KEYS[key];
+    if (scope !== "all" && scope !== which) {
+      problems.push(`${key}: only goes in ${describeScope(scope, globalPath)}`);
+      continue;
+    }
+    const result = schema.safeParse(value);
+    if (!result.success) {
+      // `workspace` and `model` used to be objects.
+      old ||= KEYS[key].type !== "json" && typeof value === "object" && value !== null;
+      problems.push(`${key}: ${result.error.issues.map((issue) => issue.message).join("; ")}`);
+      continue;
+    }
+    values[key] = result.data;
+  }
+  if (problems.length > 0) {
+    const lines = problems.map((problem) => `  ✖ ${problem}`).join("\n");
+    throw new ConfigError(`Invalid config ${path}:\n${lines}${old ? `\n${MIGRATION}` : ""}`);
+  }
+  return { path, values: values as Values };
+}
+
+/** The Git root holding `dir`, or `undefined` outside a Git repository. */
+function gitRoot(dir: string): string | undefined {
+  for (let current = resolve(dir); ; current = dirname(current)) {
+    if (existsSync(join(current, ".git"))) return current;
+    if (dirname(current) === current) return undefined;
+  }
+}
+
+/**
+ * The nearest Local Config from `cwd` up to the Git root. Outside Git, only `cwd` is checked.
+ */
+export function findLocalConfig(cwd: string): string | undefined {
+  const root = gitRoot(cwd) ?? resolve(cwd);
+  for (let current = resolve(cwd); ; current = dirname(current)) {
+    const candidate = join(current, LOCAL_CONFIG_NAME);
+    if (existsSync(candidate)) return candidate;
+    if (current === root || dirname(current) === current) return undefined;
+  }
+}
+
+/** A `stateFile` is relative to the Global Config's folder. */
+const resolveStateFile = (globalPath: string, stateFile: string) =>
+  resolve(dirname(globalPath), stateFile);
+
+/** The Global Config's keys, for commands that only need machine settings (`status`, `connect`). */
+export async function loadGlobalConfig(
+  globalPath: string,
+): Promise<{ t3Url: string; stateFile?: string }> {
+  const values = (await readLayer(globalPath, "global", globalPath))?.values ?? {};
+  return {
+    t3Url: values.t3Url ?? DEFAULT_T3_URL,
+    stateFile: values.stateFile && resolveStateFile(globalPath, values.stateFile),
+  };
+}
+
+export interface ConfigSources {
+  /** The Global Config's path; a missing file is fine. */
+  global: string;
+  /** `--config`: replaces discovery, and must exist. */
+  local?: string;
+  /** Where to start looking for the Local Config. */
+  cwd: string;
+  /** The State file when the Global Config sets none. */
+  defaultState: string;
+}
+
+/**
+ * The effective Config: per key, the Local Config, else the Global Config, else the built-in
+ * default. A value replaces the lower one whole; lists and objects never merge.
+ */
+export async function loadConfig({
+  global: globalPath,
+  local: explicitLocal,
+  cwd,
+  defaultState,
+}: ConfigSources): Promise<Config> {
+  const localPath = explicitLocal ? resolve(cwd, explicitLocal) : findLocalConfig(cwd);
+  if (localPath === resolve(globalPath)) {
+    // Background services installed before the Local Config existed pass the Global one here.
+    throw new ConfigError(
+      `--config ${localPath} is the Global Config, but --config now names a Local Config. If the background service runs this, run \`linear-t3 start\` again in the repository to watch`,
+    );
+  }
+  const globalLayer = await readLayer(globalPath, "global", globalPath);
+  const localLayer = localPath ? await readLayer(localPath, "local", globalPath) : undefined;
+  if (explicitLocal && !localLayer) throw new ConfigError(`No config at ${localPath}`);
+
+  const layers = [localLayer, globalLayer].filter((layer) => layer !== undefined);
+  const pick = <K extends Key>(key: K): { value?: Value<K>; layer?: Layer } => {
+    for (const layer of layers) {
+      if (layer.values[key] !== undefined) return { value: layer.values[key], layer };
+    }
+    return { value: (KEYS[key] as KeyDeclaration).fallback as Value<K> | undefined };
+  };
+  const get = <K extends Key>(key: K) => pick(key).value;
+  const required = <K extends Key>(key: K): Value<K> => {
+    const value = get(key);
+    if (value === undefined) {
+      const where = localLayer ? localLayer.path : `${LOCAL_CONFIG_NAME} in the repository`;
+      throw new ConfigError(`Missing "${key}": set it in the Local Config (${where})`);
+    }
+    return value;
+  };
+
+  const project = pick("project");
+  const stateFile = get("stateFile");
+  return {
+    project: required("project"),
+    projectBase: project.layer ? dirname(project.layer.path) : cwd,
+    team: required("team"),
+    filter: get("filter"),
+    setStatus: get("setStatus"),
+    comment: required("comment"),
+    model: get("model"),
+    provider: get("provider"),
+    runtimeMode: required("runtimeMode"),
+    workspace: required("workspace"),
+    baseRef: required("baseRef"),
+    startFromOrigin: required("startFromOrigin"),
+    prompt: required("prompt"),
+    pollInterval: required("pollInterval"),
+    maxRunningThreads: get("maxRunningThreads"),
+    t3Url: required("t3Url"),
+    stateFile: stateFile ? resolveStateFile(globalPath, stateFile) : defaultState,
+    files: { global: globalPath, local: localLayer?.path },
+  };
 }
