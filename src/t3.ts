@@ -56,6 +56,21 @@ export function threadIdFor(idempotencyKey: string): string {
   return stableUuid(`${idempotencyKey}:thread`);
 }
 
+/** A model a T3 Provider offers. */
+export interface T3Model {
+  slug: string;
+  name?: string;
+  aliases?: string[];
+}
+
+/** A Provider instance from T3's `server.getConfig`. */
+export interface T3Provider {
+  instanceId: string;
+  displayName: string;
+  enabled: boolean;
+  models?: T3Model[];
+}
+
 export interface T3Shell {
   projects: T3Project[];
   threads: T3Thread[];
@@ -306,6 +321,14 @@ export class T3Client {
         page.nextCursor !== null && page.nextCursor > (cursor ?? -1) ? page.nextCursor : undefined;
     } while (cursor !== undefined);
     return undefined;
+  }
+
+  /** T3's Providers and their models. Throws T3Incompatible when this T3 can't report them. */
+  async providers(): Promise<T3Provider[]> {
+    const config = (await this.call("server.getConfig", {}).catch((error: unknown) => {
+      throw unknownTag(error, "server.getConfig") ? new T3Incompatible("server.getConfig") : error;
+    })) as { providers: T3Provider[] };
+    return config.providers;
   }
 
   /** Whether T3 has the thread, active or archived. Deleted threads are absent from both snapshots. */
