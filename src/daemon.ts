@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { loadConfig, type Config } from "./config.ts";
+import { loadConfig, type Config, type Values } from "./config.ts";
 import { EnvFile } from "./env-file.ts";
 import {
   createCommentOnce,
@@ -444,6 +444,8 @@ export interface DaemonOptions {
   paths: Paths;
   // `--config`: the Local Config to use instead of the one found from the working directory.
   localConfig?: string;
+  // The keys the CLI flags set; they win over both Configs.
+  flags?: Values;
   // Do one poll, then exit.
   once: boolean;
   // Show which issues would start and which would wait on a cap, without starting threads.
@@ -454,6 +456,7 @@ export interface DaemonOptions {
 export async function runDaemon({
   paths,
   localConfig,
+  flags,
   once,
   dryRun,
 }: DaemonOptions): Promise<void> {
@@ -468,6 +471,7 @@ export async function runDaemon({
     global: paths.globalConfig,
     local: localConfig,
     cwd: process.cwd(),
+    flags,
     defaultState: paths.defaultState,
   });
   const credentials = new EnvFile(paths.credentials);

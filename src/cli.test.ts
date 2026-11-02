@@ -203,6 +203,61 @@ describe("cli", () => {
     expect(result.stdout).toMatch(/^\s+--config <path>\s+the Local Config/m);
   });
 
+  test("run --help lists a flag for every non-global key, with its default and scope", () => {
+    const result = runCli("run", "--help");
+    expect(result.status).toBe(0);
+    const help = result.stdout.replace(/\s+/g, " ");
+    const flags: [string, string, string][] = [
+      ["--project <project>", "the T3 project whose folder is the Git root", "local"],
+      ["--team <team>", "required", "local"],
+      ["--filter <json>", "none", "local"],
+      ["--set-status <status>", "leave the status as it is", "local"],
+      ["--comment [true|false]", "true", "all"],
+      ["--model <model>", "the T3 project's default model", "all"],
+      ["--provider <provider>", "the Provider of the T3 project's default model", "all"],
+      ["--runtime-mode <mode>", "full-access", "all"],
+      ["--workspace <local|worktree>", "worktree", "all"],
+      ["--base-ref <ref>", "the repository's default branch, as T3 reports it", "all"],
+      ["--start-from-origin [true|false]", "true", "all"],
+      ["--prompt <template>", "a built-in template", "all"],
+      ["--poll-interval <seconds>", "60", "all"],
+    ];
+    for (const [flag, fallback, scope] of flags) {
+      expect(help).toContain(flag);
+      const after = help.slice(help.indexOf(flag));
+      expect(after.slice(0, after.indexOf(")") + 1)).toMatch(
+        new RegExp(`\\(default: ${fallback.replace(/[|()]/g, "\\$&")}; scope: ${scope}\\)$`),
+      );
+    }
+    for (const flag of ["--max-running-threads", "--t3-url", "--state-file"]) {
+      expect(help).not.toContain(flag);
+    }
+  });
+
+  test.each(["--max-running-threads", "--t3-url", "--state-file"])(
+    "run %s is an unknown option",
+    (flag) => {
+      const result = runCliIn({ cwd: repoDir() }, "run", flag, "1");
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`unknown option '${flag}'`);
+    },
+  );
+
+  test.each<{ args: string[]; error: string }>([
+    { args: ["--filter", "{not json"], error: "--filter" },
+    { args: ["--filter", "[1]"], error: "--filter" },
+    { args: ["--comment", "maybe"], error: "--comment" },
+    { args: ["--poll-interval", "soon"], error: "--poll-interval" },
+    { args: ["--poll-interval", "5"], error: "--poll-interval" },
+    { args: ["--workspace", "root"], error: "--workspace" },
+  ])("run $args exits non-zero naming $error", ({ args, error }) => {
+    const env = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
+    const result = runCliIn({ cwd: repoDir(), env }, "run", "--once", ...args);
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(error);
+  });
+
   test("an unknown flag prints an error and exits non-zero", () => {
     const result = runCli("--bogus");
     expect(result.status).not.toBe(0);
@@ -364,7 +419,7 @@ describe("cli run", () => {
     {
       case: "no team",
       local: { team: undefined },
-      errors: (f) => [`Missing "team": set it in the Local Config (${f.local})`],
+      errors: (f) => [`Missing "team": pass --team or set it in the Local Config (${f.local})`],
     },
   ])(
     "$case exits non-zero with an error naming the file and the fix",
@@ -405,7 +460,7 @@ describe("cli run", () => {
     const result = runCliIn({ cwd: join(parent, "repo"), env: tokens }, "run", "--once");
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      `Missing "team": set it in the Local Config (${LOCAL} in the repository)`,
+      `Missing "team": pass --team or set it in the Local Config (${LOCAL} in the repository)`,
     );
   });
 
@@ -655,6 +710,97 @@ describe("cli run against fake Linear and T3", () => {
       ["ENG-1: First", "project-1"],
       ["ENG-2: Second", "project-1"],
     ]);
+  });
+
+  test("with only flags and no Local Config, polls the given team and launches into the given project", async () => {
+    const other = { id: "project-0", title: "other", workspaceRoot: "/work/other" };
+    const { linear, t3, dir, env, files } = await servers({ projects: [other, project] }, {}, [
+      ...issues.map((issue) => ({ ...issue, team: "ENG" })),
+      { id: "ops-1", identifier: "OPS-1", title: "Ops", team: "OPS" },
+    ]);
+    rmSync(join(dir, LOCAL));
+    // `t3Url` is a machine setting with no flag, so the Global Config holds only that.
+    writeFile(files.config, JSON.stringify({ t3Url: t3.url }));
+    const result = await startCli({ cwd: dir, env }, [
+      "run",
+      "--once",
+      "--project",
+      "other",
+      "--team",
+      "OPS",
+      "--model",
+      "claude-opus-5-5",
+      "--provider",
+      "claudeAgent",
+    ]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(linear.filters).toEqual([{ and: [{ team: { key: { eq: "OPS" } } }, {}] }]);
+    expect(t3.launches).toHaveLength(1);
+    expect(t3.launches[0]).toMatchObject({
+      title: "OPS-1: Ops",
+      projectId: "project-0",
+      modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+    });
+  });
+
+  test("a flag overrides the Local and Global Config; keys without a flag still come from the files", async () => {
+    const { t3, dir, env } = await servers(
+      {},
+      { prompt: "Global {identifier}", runtimeMode: "approval-required", baseRef: "develop" },
+      [issues[0]!],
+      { prompt: "Local {identifier}", startFromOrigin: true },
+    );
+    const result = await startCli({ cwd: dir, env }, [
+      "run",
+      "--once",
+      "--prompt",
+      "CLI {identifier}",
+      "--base-ref",
+      "release",
+      "--start-from-origin",
+      "false",
+      "--poll-interval",
+      "30",
+    ]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches[0]).toMatchObject({
+      initialMessage: { text: "CLI ENG-1" },
+      runtimeMode: "approval-required",
+      workspaceStrategy: { type: "worktree", baseRef: "release", startFromOrigin: false },
+    });
+  });
+
+  test("a relative --project path resolves against the working directory", async () => {
+    const projects: FakeT3Options["projects"] = [];
+    const { t3, dir, env } = await servers({ projects }, {}, issues, { project: "missing" });
+    const sub = join(dir, "src");
+    mkdirSync(sub);
+    projects.push({ id: "sub", title: "sub", workspaceRoot: sub });
+    const result = await startCli({ cwd: sub, env }, ["run", "--once", "--project", "."]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches.map((launch) => launch.projectId)).toEqual(["sub", "sub"]);
+  });
+
+  test.each<{ args: string[]; comments: number }>([
+    { args: ["--comment", "false"], comments: 0 },
+    { args: ["--comment"], comments: 1 },
+    { args: ["--comment", "true"], comments: 1 },
+  ])(
+    "$args over comment: false in the Global Config leaves $comments comment(s)",
+    async ({ args, comments }) => {
+      const { linear, dir, env } = await servers({}, { comment: false }, [issues[0]!]);
+      const result = await startCli({ cwd: dir, env }, ["run", "--once", ...args]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(linear.comments).toHaveLength(comments);
+    },
+  );
+
+  test("--comment false overrides comment: true from the Local Config", async () => {
+    const { linear, dir, env } = await servers({}, {}, [issues[0]!], { comment: true });
+    const result = await startCli({ cwd: dir, env }, ["run", "--once", "--comment", "false"])
+      .result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(linear.comments).toEqual([]);
   });
 
   test("each key takes the Local value, else the Global one, else the built-in default", async () => {
