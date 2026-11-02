@@ -3160,3 +3160,128 @@ WantedBy=default.target
     expect(calls()).toEqual(["journalctl --user -u linear-t3 -n 100 --no-pager -f"]);
   });
 });
+
+describe("README", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+  /** A Markdown table row's cells, with `\|` read back as `|`. */
+  const cells = (row: string) =>
+    row
+      .split(/(?<!\\)\|/)
+      .slice(1, -1)
+      .map((cell) => cell.trim().replaceAll("\\|", "|"));
+
+  /** The rows of the first table after `heading`, without its header and separator. */
+  function table(heading: string) {
+    const at = readme.indexOf(`${heading}\n`);
+    expect(at, heading).toBeGreaterThanOrEqual(0);
+    const section = readme.slice(at);
+    const lines = section.split("\n");
+    const start = lines.findIndex((line) => line.startsWith("|"));
+    const end = lines.findIndex((line, i) => i > start && !line.startsWith("|"));
+    return lines.slice(start + 2, end).map(cells);
+  }
+
+  /** The code blocks marked `<!-- readme-example: name -->`. */
+  const examples = (name: string) =>
+    [...readme.matchAll(/<!-- readme-example: (\S+) -->\s*```\w*\n([^]*?)```/g)]
+      .filter(([, marker]) => marker === name)
+      .map(([, , code]) => code!);
+
+  const unquote = (cell: string) => cell.replace(/^`(.*)`$/, "$1");
+
+  const runHelp = () => runCli("run", "--help").stdout;
+  /** The flags in `help`: each option's first line is two spaces, the flag and its placeholder. */
+  const helpFlags = (help: string) =>
+    [...help.matchAll(/^ {2}(?:-\w, )?(--[\w-]+(?: [<[]\S+)?)/gm)].map(([, flag]) => flag!);
+  const runOnly = ["--once", "--dry-run", "--config <path>", "--no-config", "--help"];
+
+  test("the Config keys table lists every flag in run --help with its default and scope", () => {
+    const help = runHelp();
+    const rows = table("### Config keys");
+    const flagged = rows.filter(([, flag]) => flag !== "—");
+    expect(flagged.map(([, flag]) => unquote(flag!)).sort()).toEqual(
+      helpFlags(help)
+        .filter((flag) => !runOnly.includes(flag))
+        .sort(),
+    );
+
+    const oneLine = help.replace(/\s+/g, " ");
+    for (const [key, flag, scope, unset] of flagged) {
+      const after = oneLine.slice(oneLine.indexOf(`${unquote(flag!)} `));
+      const expected = unset === "required" ? unset : `default: ${unset}`;
+      // The flag's own help ends with its default and scope.
+      const own = after.slice(0, after.indexOf(")", after.indexOf("; scope: ")) + 1);
+      expect(own.endsWith(`(${expected}; scope: ${scope})`), `${key}: ${own}`).toBe(true);
+    }
+    // Keys without a flag are the machine settings, which only the Global Config holds.
+    for (const [key, , scope] of rows.filter(([, flag]) => flag === "—")) {
+      expect(scope, key).toBe("global");
+    }
+  });
+
+  test("the run flags table lists run's own flags", () => {
+    const flags = runOnly.filter((flag) => flag !== "--help");
+    expect(helpFlags(runHelp())).toEqual(expect.arrayContaining(flags));
+    expect(table("### `run`").map(([flag]) => unquote(flag!))).toEqual(flags);
+  });
+
+  const cleanup: (() => void)[] = [];
+  afterEach(() => cleanup.splice(0).forEach((close) => close()));
+
+  /**
+   * Fake servers for team FIT and a repository T3 has as project `my-app`, whose default model is
+   * Opus, as the README's examples assume. `global` is the Global Config, pointed at the fake T3.
+   */
+  async function setup(global: string, local?: string) {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "linear-t3-repo-")));
+    mkdirSync(join(dir, ".git"));
+    if (local !== undefined) writeFileSync(join(dir, LOCAL), local);
+    const linear = await fakeLinear([], { teams: ["FIT"], labels: ["agent"] });
+    const defaultModelSelection = { instanceId: "claudeAgent", model: "claude-opus-5-5" };
+    const t3 = await fakeT3({
+      projects: [{ id: "project-1", title: "my-app", workspaceRoot: dir, defaultModelSelection }],
+    });
+    cleanup.push(linear.close, t3.close);
+    const home = homeDir();
+    writeFile(locations(home).config, JSON.stringify({ ...JSON.parse(global), t3Url: t3.url }));
+    const env = { ...home, LINEAR_API_URL: linear.url, LINEAR_API_KEY: "lin-key", T3_TOKEN: "t" };
+    return { dir, env };
+  }
+
+  test("every run command in the examples is accepted against the fakes", async () => {
+    const commands = examples("cli")
+      .flatMap((code) => code.split("\n"))
+      .filter((line) => /^(npx )?linear-t3 run\b/.test(line))
+      .map((line) => line.replace(/#.*/, "").trim());
+    expect(commands.length).toBeGreaterThan(0);
+    const { dir, env } = await setup(examples("global")[0]!);
+    for (const command of commands) {
+      expect(command).not.toMatch(/["']/);
+      const args = command.replace(/^(npx )?linear-t3 /, "").split(/\s+/);
+      // A plain run polls until stopped, so check it with a dry run instead.
+      if (!args.includes("--once") && !args.includes("--dry-run")) args.push("--dry-run");
+      const result = await startCli({ cwd: dir, env }, args).result;
+      expect(result, command).toMatchObject({ status: 0, stderr: "" });
+    }
+  });
+
+  test.each(["", "migrated-"])(
+    "the %sGlobal and Local Config examples are accepted",
+    async (prefix) => {
+      const [global] = examples(`${prefix}global`);
+      const [local] = examples(`${prefix}local`);
+      const { dir, env } = await setup(global!, local!);
+      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain("watching FIT -> my-app");
+    },
+  );
+
+  test("the old Config example is rejected with the migration hint", async () => {
+    const { dir, env } = await setup(examples("old")[0]!);
+    const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("the old Config shape");
+  });
+});
