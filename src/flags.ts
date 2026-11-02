@@ -6,10 +6,16 @@ const keys = Object.keys(KEYS) as Key[];
 /** The keys that get a flag: all but the machine settings, which only the Global Config holds. */
 const flagKeys = keys.filter((key) => KEYS[key].scope !== "global");
 
-/** Turns what was typed after a flag into the key's value, or says what's wrong with it. */
-function parse(declaration: KeyDeclaration, text: string): unknown {
+/**
+ * Turns what was typed after a flag into the key's value, or says what's wrong with it. A `list`
+ * flag adds its item to what the earlier repeats of it gave.
+ */
+function parse(declaration: KeyDeclaration, text: string, previous: unknown): unknown {
   let value: unknown = text;
   switch (declaration.type) {
+    case "list":
+      value = [...((previous as string[] | undefined) ?? []), text];
+      break;
     case "boolean":
       if (text !== "true" && text !== "false") throw new InvalidArgumentError("Use true or false.");
       value = text === "true";
@@ -46,8 +52,8 @@ export function configOptions(): Option[] {
     const arg = declaration.type === "boolean" ? "[true|false]" : (declaration.arg ?? "<value>");
     const help = `${declaration.description} (${helpDefault(declaration)}; scope: ${declaration.scope})`;
     // A bare boolean flag means `true`, which is what commander gives an optional value left out.
-    return new Option(`--${flagName(key)} ${arg}`, help).argParser((text) =>
-      parse(declaration, text),
+    return new Option(`--${flagName(key)} ${arg}`, help).argParser((text, previous) =>
+      parse(declaration, text, previous),
     );
   });
 }

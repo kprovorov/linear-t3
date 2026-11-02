@@ -211,6 +211,8 @@ describe("cli", () => {
     const flags: [string, string, string][] = [
       ["--project <project>", "default: the T3 project whose folder is the Git root", "local"],
       ["--team <team>", "required", "local"],
+      ["--status <status>", "default: any status", "local"],
+      ["--label <label>", "default: any labels", "local"],
       ["--filter <json>", "default: none", "local"],
       ["--set-status <status>", "default: leave the status as it is", "local"],
       ["--comment [true|false]", "default: true", "all"],
@@ -367,6 +369,15 @@ describe("cli run", () => {
       errors: (f) => [
         `Invalid config ${f.global}:`,
         "team: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
+      ],
+    },
+    {
+      case: "status and label in the Global Config",
+      global: { status: ["Todo"], label: ["ready-for-agent"] },
+      errors: (f) => [
+        `Invalid config ${f.global}:`,
+        "status: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
+        "label: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
       ],
     },
     {
@@ -626,8 +637,9 @@ describe("cli run against fake Linear and T3", () => {
     global: Record<string, unknown> = {},
     linearIssues: FakeIssue[] = issues,
     local: Record<string, unknown> = {},
+    linearOptions: Parameters<typeof fakeLinear>[1] = {},
   ) {
-    const linear = await fakeLinear(linearIssues);
+    const linear = await fakeLinear(linearIssues, linearOptions);
     const t3 = await fakeT3({ projects: [project], ...t3Options });
     cleanup.push(linear.close, t3.close);
     const home = homeDir();
@@ -712,6 +724,115 @@ describe("cli run against fake Linear and T3", () => {
       ["ENG-1: First", "project-1"],
       ["ENG-2: Second", "project-1"],
     ]);
+  });
+
+  describe("status and label", () => {
+    const queue: FakeIssue[] = [
+      { id: "i-1", identifier: "ENG-1", title: "Todo", status: "Todo", labels: ["a"] },
+      { id: "i-2", identifier: "ENG-2", title: "Backlog", status: "Backlog", labels: ["a", "b"] },
+      { id: "i-3", identifier: "ENG-3", title: "Started", status: "In Progress", labels: ["b"] },
+      { id: "i-4", identifier: "ENG-4", title: "Both", status: "Todo", labels: ["B", "A", "c"] },
+    ];
+    const labels = ["A", "B", "c"];
+    const launched = (t3: { launches: Record<string, unknown>[] }) =>
+      t3.launches.map((launch) => String(launch.title).split(":")[0]).sort();
+
+    test("--status todo --status backlog launches issues in either status, and nothing else", async () => {
+      const { t3, dir, env } = await servers({}, {}, queue, {}, { labels });
+      const result = await startCli({ cwd: dir, env }, [
+        "run",
+        "--once",
+        "--status",
+        "todo",
+        "--status",
+        "backlog",
+      ]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-1", "ENG-2", "ENG-4"]);
+    });
+
+    test("--label a --label b launches only issues that carry both labels", async () => {
+      const { t3, dir, env } = await servers({}, {}, queue, {}, { labels });
+      const result = await startCli({ cwd: dir, env }, [
+        "run",
+        "--once",
+        "--label",
+        "a",
+        "--label",
+        "b",
+      ]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-2", "ENG-4"]);
+    });
+
+    test("--status replaces the Local Config's status rather than adding to it", async () => {
+      const { t3, dir, env } = await servers({}, {}, queue, { status: ["Todo"] }, { labels });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once", "--status", "Backlog"])
+        .result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-2"]);
+    });
+
+    test("a single status or label in the Local Config may be a string", async () => {
+      const local = { status: "backlog", label: "b" };
+      const { t3, dir, env } = await servers({}, {}, queue, local, { labels });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-2"]);
+    });
+
+    test("status and label from the Local Config, with a raw filter, launch only issues matching all", async () => {
+      const { linear, t3, dir, env } = await servers(
+        {},
+        {},
+        queue,
+        {
+          status: ["todo", "In Progress"],
+          label: ["b"],
+          filter: { state: { type: { eq: "unstarted" } } },
+        },
+        { labels },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-4"]);
+      expect(linear.filters).toEqual([
+        {
+          and: [
+            { team: { key: { eq: "ENG" } } },
+            { state: { name: { in: ["Todo", "In Progress"] } } },
+            { labels: { some: { name: { eqIgnoreCase: "B" } } } },
+            { state: { type: { eq: "unstarted" } } },
+          ],
+        },
+      ]);
+    });
+
+    test.each<{ args: string[]; error: string }>([
+      {
+        args: ["--status", "Todo", "--status", "Doing"],
+        error:
+          'Team ENG has no status named "Doing". Valid statuses: Backlog, Done, In Progress, Todo',
+      },
+      {
+        args: ["--label", "a", "--label", "bug", "--label", "z"],
+        error: 'Team ENG has no label named "bug", "z". Valid labels: A, B, c',
+      },
+      {
+        args: ["--team", "OPS", "--status", "Todo"],
+        error: 'No Linear team has the key "OPS"',
+      },
+    ])(
+      "$args exits non-zero before the first poll, listing the valid names",
+      async ({ args, error }) => {
+        const { linear, t3, dir, env } = await servers({}, {}, queue, {}, { labels });
+        const result = await startCli({ cwd: dir, env }, ["run", "--once", ...args]).result;
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain(error);
+        expect(linear.filters).toEqual([]);
+        expect(t3.launches).toEqual([]);
+      },
+    );
   });
 
   test("with only flags and no Local Config, polls the given team and launches into the given project", async () => {

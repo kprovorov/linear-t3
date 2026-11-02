@@ -9,8 +9,10 @@ import {
   createLinearClient,
   listIssues,
   moveToState,
+  teamIssueFilter,
   type Issue,
   type LinearClient,
+  type LinearDocument,
 } from "./linear.ts";
 import type { Paths } from "./paths.ts";
 import { findProject } from "./project.ts";
@@ -27,6 +29,8 @@ import {
   type WorkspaceStrategy,
 } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
+
+type IssueFilter = LinearDocument.IssueFilter;
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
@@ -104,15 +108,17 @@ function resolveModel(
 }
 
 /**
- * Before the first poll: the T3 project this run watches, and `config` with `model` and
- * `provider` resolved through T3's model catalog and `baseRef` set, as configured or else the
- * project's default branch. Worktrees need it; `workspace: local` creates none, so it isn't
- * looked up.
+ * Before the first poll: the T3 project this run watches, `config` with `model` and `provider`
+ * resolved through T3's model catalog and `baseRef` set, as configured or else the project's
+ * default branch, and the issue filter, with its status and label names checked against the team.
+ * Worktrees need `baseRef`; `workspace: local` creates none, so it isn't looked up.
  */
 async function prepare(
   loaded: Config,
   t3Token: string,
-): Promise<{ config: Config; project: T3Project }> {
+  linear: LinearClient,
+): Promise<{ config: Config; project: T3Project; filter: IssueFilter }> {
+  const filter = await teamIssueFilter(linear, loaded, shutdown.signal);
   const t3 = await T3Client.connect(loaded.t3Url, t3Token, shutdown.signal);
   // Shutdown ends the wait for T3 by closing the socket.
   const closeOnShutdown = () => t3.close();
@@ -131,7 +137,7 @@ async function prepare(
       loaded = { ...loaded, model, provider: instanceId };
     }
     if (loaded.workspace === "local" || loaded.baseRef !== undefined) {
-      return { config: loaded, project };
+      return { config: loaded, project, filter };
     }
     const baseRef = await t3.defaultBranch(project.workspaceRoot);
     if (baseRef === undefined) {
@@ -140,7 +146,7 @@ async function prepare(
       );
     }
     log(`worktrees branch from ${baseRef}, the default branch of "${project.title}"`);
-    return { config: { ...loaded, baseRef }, project };
+    return { config: { ...loaded, baseRef }, project, filter };
   } finally {
     shutdown.signal.removeEventListener("abort", closeOnShutdown);
     t3.close();
@@ -308,6 +314,7 @@ function failLaunch(issue: Issue, error: unknown): void {
 
 async function poll(
   config: Config,
+  filter: IssueFilter,
   linear: LinearClient,
   state: StateStore,
   t3Token: string,
@@ -320,7 +327,7 @@ async function poll(
     }
   }
 
-  const candidates = await collectCandidates(config, linear, state);
+  const candidates = await collectCandidates(filter, linear, state);
   // A dry run still reads T3, to show the Running counts.
   if (candidates.length === 0 && !dryRun) return;
   if (candidates.length > 0)
@@ -344,14 +351,13 @@ function byLaunchOrder(a: Issue, b: Issue): number {
 
 /** Matching issues not launched yet and not backing off, by priority, then oldest first. */
 async function collectCandidates(
-  config: Config,
+  filter: IssueFilter,
   linear: LinearClient,
   state: StateStore,
 ): Promise<Issue[]> {
   const now = Date.now();
   // Every poll reads all matching issues: one can start matching without being updated itself,
   // e.g. when its blocker is done.
-  const filter = { and: [{ team: { key: { eq: config.team } } }, config.filter ?? {}] };
   const issues = await listIssues(linear, filter, shutdown.signal);
   return issues
     .filter((issue) => !state.has(issue.id) && (launchFailures.get(issue.id)?.retryAt ?? 0) <= now)
@@ -479,13 +485,13 @@ export async function runDaemon({
   const t3Token = requireToken("T3_TOKEN", credentials, "t3");
   let prepared: Awaited<ReturnType<typeof prepare>>;
   try {
-    prepared = await prepare(loaded, t3Token);
+    prepared = await prepare(loaded, t3Token, linear);
   } catch (error) {
     // Ctrl+C while connecting isn't a failure.
     if (shutdown.signal.aborted) return;
     throw error;
   }
-  const { config, project } = prepared;
+  const { config, project, filter } = prepared;
   const state = new StateStore(config.stateFile);
   // A dry run launches nothing, so it never writes State.
   await state.load({ checkWritable: !dryRun });
@@ -493,7 +499,7 @@ export async function runDaemon({
   log(`watching ${config.team} -> ${project.title}`);
   while (!shutdown.signal.aborted) {
     try {
-      await poll(config, linear, state, t3Token, dryRun);
+      await poll(config, filter, linear, state, t3Token, dryRun);
     } catch (error) {
       if (error instanceof StateWriteError) throw error;
       log(`poll failed: ${(error as Error).message}`);
