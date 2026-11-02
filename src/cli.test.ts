@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -163,7 +164,8 @@ const LOCAL = "linear-t3.config.json";
  * with `local` merged in. `undefined` values drop a key.
  */
 function repoDir(local: Record<string, unknown> = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "linear-t3-repo-"));
+  // The real path: on macOS the temp dir is a symlink, and the CLI sees its working directory resolved.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "linear-t3-repo-")));
   mkdirSync(join(dir, ".git"));
   writeFileSync(join(dir, LOCAL), JSON.stringify({ project: "my-app", team: "ENG", ...local }));
   return dir;
