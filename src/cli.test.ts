@@ -876,6 +876,17 @@ describe("cli run against fake Linear and T3", () => {
     expect(t3.launches.map((launch) => launch.projectId)).toEqual(["project-1", "project-1"]);
   });
 
+  test("an absolute project path wins over a project titled the same", async () => {
+    const projects: FakeT3Options["projects"] = [
+      { id: "titled", title: "/work/my-app", workspaceRoot: "/work/elsewhere" },
+      { id: "rooted", title: "app", workspaceRoot: "/work/my-app" },
+    ];
+    const { t3, dir, env } = await servers({ projects }, {}, issues, { project: "/work/my-app" });
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches.map((launch) => launch.projectId)).toEqual(["rooted", "rooted"]);
+  });
+
   test("--config replaces the discovered Local Config", async () => {
     // The discovered one names a project T3 doesn't have.
     const { t3, dir, env } = await servers({}, {}, issues, { project: "missing" });
