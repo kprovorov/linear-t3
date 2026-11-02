@@ -23,20 +23,24 @@ export type Scope = "global" | "local" | "all";
 /** How a key's value is written, so that a flag can be generated from it. */
 export type KeyType = "string" | "boolean" | "integer" | "json";
 
-interface KeyDeclaration<S extends z.ZodType = z.ZodType> {
+export interface KeyDeclaration<S extends z.ZodType = z.ZodType> {
   type: KeyType;
   scope: Scope;
   schema: S;
   /** The built-in default, used when no layer sets the key. */
   fallback?: z.output<S>;
   description: string;
+  /** The flag's value placeholder in help, e.g. `<team>`. Booleans always get `[true|false]`. */
+  arg?: string;
+  /** What help says the default is, when `fallback` is unset or doesn't read well. */
+  defaultText?: string;
 }
 
 const declare = <S extends z.ZodType>(declaration: KeyDeclaration<S>) => declaration;
 
 /**
- * Every Config key, declared once. Scope checks, defaults and validation come from here, and so
- * will the CLI flags: each key's flag is its name in kebab-case.
+ * Every Config key, declared once. Scope checks, defaults, validation and the CLI flags come from
+ * here: each non-global key's flag is its name in kebab-case.
  */
 export const KEYS = {
   project: declare({
@@ -44,13 +48,17 @@ export const KEYS = {
     scope: "local",
     schema: z.string().min(1),
     description:
-      "the T3 project to launch threads in: its id, folder path (relative to this file) or unique title (default: the T3 project whose folder is the Git root)",
+      "the T3 project to launch threads in: its id, unique title or folder path, relative to the file that sets it or, on the CLI, to the working directory",
+    arg: "<project>",
+    defaultText: "the T3 project whose folder is the Git root",
   }),
   team: declare({
     type: "string",
     scope: "local",
     schema: z.string().min(1),
     description: 'the Linear team key whose issues to watch, e.g. "ENG"',
+    arg: "<team>",
+    defaultText: "required",
   }),
   filter: declare({
     type: "json",
@@ -58,13 +66,17 @@ export const KEYS = {
     // A raw Linear `IssueFilter`, ANDed with the team and passed to the Linear API as-is. See
     // https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter
     schema: z.record(z.string(), z.unknown()),
-    description: "a Linear IssueFilter that issues must also match",
+    description: "a Linear IssueFilter, as JSON, that issues must also match",
+    arg: "<json>",
+    defaultText: "none",
   }),
   setStatus: declare({
     type: "string",
     scope: "local",
     schema: z.string().min(1),
     description: "the workflow status to move an issue to once its thread starts",
+    arg: "<status>",
+    defaultText: "leave the status as it is",
   }),
   comment: declare({
     type: "boolean",
@@ -77,21 +89,26 @@ export const KEYS = {
     type: "string",
     scope: "all",
     schema: z.string().min(1),
-    description: "the exact model id threads run on (default: the T3 project's default model)",
+    description: "the exact model id threads run on",
+    arg: "<model>",
+    defaultText: "the T3 project's default model",
   }),
   provider: declare({
     type: "string",
     scope: "all",
     schema: z.string().min(1),
-    description:
-      "the T3 Provider instance id for `model` (default: the Provider of the T3 project's default model)",
+    description: "the T3 Provider instance id for `model`",
+    arg: "<provider>",
+    defaultText: "the Provider of the T3 project's default model",
   }),
   runtimeMode: declare({
     type: "string",
     scope: "all",
     schema: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]),
     fallback: "full-access",
-    description: "the T3 runtime mode threads start in",
+    description:
+      "the T3 runtime mode threads start in: approval-required, auto-accept-edits, auto or full-access",
+    arg: "<mode>",
   }),
   workspace: declare({
     type: "string",
@@ -100,13 +117,15 @@ export const KEYS = {
     fallback: "worktree",
     description:
       "`worktree`: a new Git worktree per issue, on its Linear branch; `local`: the project's own checkout",
+    arg: "<local|worktree>",
   }),
   baseRef: declare({
     type: "string",
     scope: "all",
     schema: z.string().min(1),
-    description:
-      "the ref new worktrees branch from (default: the repository's default branch, as T3 reports it)",
+    description: "the ref new worktrees branch from",
+    arg: "<ref>",
+    defaultText: "the repository's default branch, as T3 reports it",
   }),
   startFromOrigin: declare({
     type: "boolean",
@@ -122,13 +141,16 @@ export const KEYS = {
     fallback: DEFAULT_PROMPT,
     description:
       "the first message of each thread; {identifier}, {title}, {url}, {description} and {branchName} are filled in",
+    arg: "<template>",
+    defaultText: "a built-in template",
   }),
   pollInterval: declare({
     type: "integer",
     scope: "all",
     schema: z.number().int().min(10),
     fallback: 60,
-    description: "seconds between polls of Linear",
+    description: "seconds between polls of Linear, at least 10",
+    arg: "<seconds>",
   }),
   maxRunningThreads: declare({
     type: "integer",
@@ -154,11 +176,14 @@ export const KEYS = {
 
 export type Key = keyof typeof KEYS;
 type Value<K extends Key> = z.output<(typeof KEYS)[K]["schema"]>;
-type Values = { [K in Key]?: Value<K> };
+export type Values = { [K in Key]?: Value<K> };
 
-/** One Config file and the keys it sets. */
+/** One source of keys: a Config file, or the CLI flags. */
 interface Layer {
-  path: string;
+  /** The file, for messages; none for the CLI. */
+  path?: string;
+  /** The folder relative paths in it resolve against. */
+  base: string;
   values: Values;
 }
 
@@ -190,6 +215,9 @@ export interface Config {
 }
 
 const isKey = (key: string): key is Key => Object.hasOwn(KEYS, key);
+
+/** A key's flag, without the dashes: its name in kebab-case. */
+export const flagName = (key: Key) => key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
 
 // Keys of the old nested Config that became a flat key under another name.
 const RENAMED: Record<string, string> = {
@@ -282,7 +310,7 @@ async function readLayer(
     const lines = problems.map((problem) => `  ✖ ${problem}`).join("\n");
     throw new ConfigError(`Invalid config ${path}:\n${lines}${old ? `\n${MIGRATION}` : ""}`);
   }
-  return { path, values: values as Values };
+  return { path, base: dirname(path), values: values as Values };
 }
 
 /** The Git root holding `dir`, or `undefined` outside a Git repository. */
@@ -325,20 +353,23 @@ export interface ConfigSources {
   global: string;
   /** `--config`: replaces discovery, and must exist. */
   local?: string;
-  /** Where to start looking for the Local Config. */
+  /** Where to start looking for the Local Config, and what a relative path on the CLI is relative to. */
   cwd: string;
+  /** The keys the CLI flags set, already validated. */
+  flags?: Values;
   /** The State file when the Global Config sets none. */
   defaultState: string;
 }
 
 /**
- * The effective Config: per key, the Local Config, else the Global Config, else the built-in
- * default. A value replaces the lower one whole; lists and objects never merge.
+ * The effective Config: per key, the CLI flags, else the Local Config, else the Global Config,
+ * else the built-in default. A value replaces the lower one whole; lists and objects never merge.
  */
 export async function loadConfig({
   global: globalPath,
   local: explicitLocal,
   cwd,
+  flags = {},
   defaultState,
 }: ConfigSources): Promise<Config> {
   const localPath = explicitLocal ? resolve(cwd, explicitLocal) : findLocalConfig(cwd);
@@ -352,7 +383,8 @@ export async function loadConfig({
   const localLayer = localPath ? await readLayer(localPath, "local", globalPath) : undefined;
   if (explicitLocal && !localLayer) throw new ConfigError(`No config at ${localPath}`);
 
-  const layers = [localLayer, globalLayer].filter((layer) => layer !== undefined);
+  const cliLayer: Layer = { base: cwd, values: flags };
+  const layers = [cliLayer, localLayer, globalLayer].filter((layer) => layer !== undefined);
   const pick = <K extends Key>(key: K): { value?: Value<K>; layer?: Layer } => {
     for (const layer of layers) {
       if (layer.values[key] !== undefined) return { value: layer.values[key], layer };
@@ -364,7 +396,9 @@ export async function loadConfig({
     const value = get(key);
     if (value === undefined) {
       const where = localLayer ? localLayer.path : `${LOCAL_CONFIG_NAME} in the repository`;
-      throw new ConfigError(`Missing "${key}": set it in the Local Config (${where})`);
+      throw new ConfigError(
+        `Missing "${key}": pass --${flagName(key)} or set it in the Local Config (${where})`,
+      );
     }
     return value;
   };
@@ -375,7 +409,7 @@ export async function loadConfig({
     project:
       project.value === undefined
         ? { folder: gitRoot(cwd) ?? resolve(cwd) }
-        : { ref: project.value, base: project.layer ? dirname(project.layer.path) : cwd },
+        : { ref: project.value, base: project.layer?.base ?? cwd },
     team: required("team"),
     filter: get("filter"),
     setStatus: get("setStatus"),

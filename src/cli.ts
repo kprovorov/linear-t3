@@ -17,6 +17,7 @@ import { t3BaseUrl, t3Integration } from "./connect-t3.ts";
 import { runDaemon } from "./daemon.ts";
 import { EnvFile } from "./env-file.ts";
 import { LOCAL_CONFIG_NAME, loadGlobalConfig } from "./config.ts";
+import { configFlags, configOptions } from "./flags.ts";
 import { resolvePaths } from "./paths.ts";
 import { preflight } from "./preflight.ts";
 import { ServiceError, daemonUnit, serviceManager } from "./service.ts";
@@ -141,20 +142,20 @@ function runSetup(): void {
   );
 }
 
-async function runDaemonCommand({
-  once = false,
-  dryRun = false,
-  config,
-}: {
-  once?: boolean;
-  dryRun?: boolean;
-  config?: string;
-}): Promise<void> {
+async function runDaemonCommand(
+  options: {
+    once?: boolean;
+    dryRun?: boolean;
+    config?: string;
+  } & Record<string, unknown>,
+): Promise<void> {
+  const { once = false, dryRun = false, config } = options;
   try {
     // A dry run only reports, so polling again would just report the same again.
     await runDaemon({
       paths: paths(),
       localConfig: config,
+      flags: configFlags(options),
       once: once || dryRun,
       dryRun,
     });
@@ -288,7 +289,7 @@ program
   )
   .action(runConnect);
 
-program
+const run = program
   .command("run")
   .description("run the Daemon in the foreground: poll Linear and launch T3 threads")
   .option("--once", "do one poll, then exit")
@@ -298,6 +299,7 @@ program
   )
   .option(...CONFIG_OPTION)
   .action(runDaemonCommand);
+for (const option of configOptions()) run.addOption(option);
 
 program
   .command("start")
