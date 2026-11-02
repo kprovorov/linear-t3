@@ -139,10 +139,15 @@ export const KEYS = {
   setStatus: declare({
     type: "string",
     scope: "local",
-    schema: z.string().min(1),
-    description: "the workflow status to move an issue to once its thread starts",
-    arg: "<status>",
-    defaultText: "leave the status as it is",
+    // `false` leaves the status alone. On the CLI it's typed as the text "false".
+    schema: z.preprocess(
+      (value) => (value === "false" ? false : value),
+      z.union([z.literal(false), z.string().min(1)]),
+    ),
+    fallback: "In Progress",
+    description:
+      "the workflow status of the team to move an issue to once its thread starts, or false to leave it alone",
+    arg: "<status|false>",
   }),
   comment: declare({
     type: "boolean",
@@ -271,7 +276,8 @@ export interface Config {
   /** 1 (Urgent) to 4 (Low); issues at this priority or a more urgent one match. */
   priority?: number;
   filter?: Value<"filter">;
-  setStatus?: string;
+  /** The workflow status name to move launched issues to, matched ignoring case; `false`: none. */
+  setStatus: string | false;
   comment: boolean;
   model?: string;
   provider?: string;
@@ -509,7 +515,7 @@ export async function loadConfig({
     assignee: get("assignee"),
     priority: get("priority"),
     filter: get("filter"),
-    setStatus: get("setStatus"),
+    setStatus: required("setStatus"),
     comment: required("comment"),
     model: get("model"),
     provider: get("provider"),
