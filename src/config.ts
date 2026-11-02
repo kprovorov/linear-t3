@@ -20,8 +20,11 @@ export const DEFAULT_PROMPT = `Work on Linear issue {identifier}: {title}
  */
 export type Scope = "global" | "local" | "all";
 
-/** How a key's value is written, so that a flag can be generated from it. */
-export type KeyType = "string" | "boolean" | "integer" | "json";
+/**
+ * How a key's value is written, so that a flag can be generated from it. A `list` is an array of
+ * strings, whose flag is repeated once per item.
+ */
+export type KeyType = "string" | "boolean" | "integer" | "json" | "list";
 
 export interface KeyDeclaration<S extends z.ZodType = z.ZodType> {
   type: KeyType;
@@ -69,6 +72,23 @@ export const KEYS = {
     description: "a Linear IssueFilter, as JSON, that issues must also match",
     arg: "<json>",
     defaultText: "none",
+  }),
+  status: declare({
+    type: "list",
+    scope: "local",
+    schema: z.array(z.string().min(1)).min(1),
+    description:
+      "a workflow status of the team that issues must be in; repeat it to accept any of several",
+    arg: "<status>",
+    defaultText: "any status",
+  }),
+  label: declare({
+    type: "list",
+    scope: "local",
+    schema: z.array(z.string().min(1)).min(1),
+    description: "a label of the team that issues must carry; repeat it to require all of several",
+    arg: "<label>",
+    defaultText: "any labels",
   }),
   setStatus: declare({
     type: "string",
@@ -195,6 +215,10 @@ export interface Config {
    */
   project: { ref: string; base: string } | { folder: string };
   team: string;
+  /** Workflow status names, matched ignoring case; an issue must be in any of them. */
+  status?: string[];
+  /** Label names, matched ignoring case; an issue must carry all of them. */
+  label?: string[];
   filter?: Value<"filter">;
   setStatus?: string;
   comment: boolean;
@@ -232,7 +256,7 @@ const RENAMED: Record<string, string> = {
 const MIGRATION = [
   "The Config is now flat, one T3 project per run. Rewrite it as:",
   `  - the Global Config: t3Url, maxRunningThreads, stateFile and any shared defaults`,
-  `  - a ${LOCAL_CONFIG_NAME} in each repository: project, team, filter, setStatus`,
+  `  - a ${LOCAL_CONFIG_NAME} in each repository: project, team, status, label, filter, setStatus`,
   "Renamed keys:",
   "  linear.team → team, linear.filter → filter",
   "  linear.onLaunch.moveToState → setStatus, linear.onLaunch.comment → comment",
@@ -300,7 +324,11 @@ async function readLayer(
     const result = schema.safeParse(value);
     if (!result.success) {
       // `workspace` and `model` used to be objects.
-      old ||= KEYS[key].type !== "json" && typeof value === "object" && value !== null;
+      old ||=
+        KEYS[key].type !== "json" &&
+        KEYS[key].type !== "list" &&
+        typeof value === "object" &&
+        value !== null;
       problems.push(`${key}: ${result.error.issues.map((issue) => issue.message).join("; ")}`);
       continue;
     }
@@ -411,6 +439,8 @@ export async function loadConfig({
         ? { folder: gitRoot(cwd) ?? resolve(cwd) }
         : { ref: project.value, base: project.layer?.base ?? cwd },
     team: required("team"),
+    status: get("status"),
+    label: get("label"),
     filter: get("filter"),
     setStatus: get("setStatus"),
     comment: required("comment"),

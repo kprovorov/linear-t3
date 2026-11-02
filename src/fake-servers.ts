@@ -14,14 +14,93 @@ export interface FakeIssue {
   createdAt?: string;
   /** Team key. When set, the issue only matches queries filtered to this team. */
   team?: string;
+  /** Workflow status name, one of the team's statuses. Default "Todo". */
+  status?: string;
+  /** Label names, each one of the team's labels. */
+  labels?: string[];
 }
 
-/** The team key the Daemon's issue filter asks for, if any. */
-function filteredTeam(variables: unknown): string | undefined {
-  const filter = (variables as { filter?: { and?: { team?: { key?: { eq?: string } } }[] } })
-    ?.filter;
-  return filter?.and?.find((clause) => clause.team)?.team?.key?.eq;
+/** A workflow status of the fake team. */
+export interface FakeStatus {
+  name: string;
+  type: "triage" | "backlog" | "unstarted" | "started" | "completed" | "canceled";
 }
+
+/** The key of the one team the fake has statuses and labels for. */
+export const FAKE_TEAM = "ENG";
+
+export const FAKE_STATUSES: FakeStatus[] = [
+  { name: "Backlog", type: "backlog" },
+  { name: "Todo", type: "unstarted" },
+  { name: "In Progress", type: "started" },
+  { name: "Done", type: "completed" },
+];
+
+class UnsupportedFilter extends Error {}
+
+/** One field's comparator: `{ eq }`, `{ eqIgnoreCase }` or `{ in }`, nothing else. */
+function compare(value: string, comparator: unknown, path: string): boolean {
+  const entries = Object.entries(comparator as Record<string, unknown>);
+  return entries.every(([op, operand]) => {
+    if (op === "eq") return value === operand;
+    if (op === "eqIgnoreCase" && typeof operand === "string") {
+      return value.toLowerCase() === operand.toLowerCase();
+    }
+    if (op === "in" && Array.isArray(operand)) return operand.includes(value);
+    throw new UnsupportedFilter(`${path}.${op}`);
+  });
+}
+
+/**
+ * Whether `issue` matches a Linear `IssueFilter`. Only the criteria the Daemon sends are
+ * understood; any other throws, so a filter the fake can't read never matches everything.
+ */
+function matches(issue: FakeIssue, filter: unknown, statuses: FakeStatus[]): boolean {
+  return Object.entries((filter ?? {}) as Record<string, unknown>).every(([field, value]) => {
+    const criteria = value as Record<string, unknown>;
+    switch (field) {
+      case "and":
+        return (value as unknown[]).every((clause) => matches(issue, clause, statuses));
+      case "or":
+        return (value as unknown[]).some((clause) => matches(issue, clause, statuses));
+      case "team":
+        return Object.entries(criteria).every(([key, comparator]) => {
+          if (key !== "key") throw new UnsupportedFilter(`team.${key}`);
+          return issue.team === undefined || compare(issue.team, comparator, "team.key");
+        });
+      case "state": {
+        const name = issue.status ?? "Todo";
+        const status = statuses.find((s) => s.name === name);
+        if (!status) throw new Error(`Fake issue ${issue.identifier} has unknown status ${name}`);
+        return Object.entries(criteria).every(([key, comparator]) => {
+          if (key === "name") return compare(name, comparator, "state.name");
+          if (key === "type") return compare(status.type, comparator, "state.type");
+          throw new UnsupportedFilter(`state.${key}`);
+        });
+      }
+      case "labels":
+        return Object.entries(criteria).every(([key, labelFilter]) => {
+          if (key !== "some") throw new UnsupportedFilter(`labels.${key}`);
+          return (issue.labels ?? []).some((label) =>
+            Object.entries(labelFilter as Record<string, unknown>).every(
+              ([labelKey, comparator]) => {
+                if (labelKey !== "name") throw new UnsupportedFilter(`labels.some.${labelKey}`);
+                return compare(label, comparator, "labels.some.name");
+              },
+            ),
+          );
+        });
+      default:
+        throw new UnsupportedFilter(field);
+    }
+  });
+}
+
+/** One page holding every node, as a Linear connection. */
+const connection = <T>(nodes: T[]) => ({
+  nodes,
+  pageInfo: { hasNextPage: false, hasPreviousPage: false, endCursor: null },
+});
 
 async function readBody(req: IncomingMessage): Promise<string> {
   let body = "";
@@ -35,11 +114,19 @@ async function listen(server: Server): Promise<string> {
 }
 
 /**
- * A Linear GraphQL API that answers the viewer query with a fixed user, creates comments, and
- * answers every other query with `issues`, keeping only those of the team the query filters on.
- * With `apiKey` set, any other key gets Linear's authentication error.
+ * A Linear GraphQL API for one team that answers the viewer query with a fixed user, creates
+ * comments, lists the team's workflow statuses and labels, and answers every other query with the
+ * `issues` that match its filter. With `apiKey` set, any other key gets Linear's authentication
+ * error.
  */
-export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: string } = {}) {
+export async function fakeLinear(
+  issues: FakeIssue[],
+  {
+    apiKey,
+    statuses = FAKE_STATUSES,
+    labels = [],
+  }: { apiKey?: string; statuses?: FakeStatus[]; labels?: string[] } = {},
+) {
   const queries: string[] = [];
   // The input of each comment created.
   const comments: { id?: string; issueId?: string; body?: string }[] = [];
@@ -73,9 +160,30 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
       res.end(JSON.stringify({ data: { commentCreate } }));
       return;
     }
-    filters.push((variables as { filter?: unknown } | undefined)?.filter);
-    const team = filteredTeam(variables);
-    const matching = issues.filter((issue) => issue.team === undefined || issue.team === team);
+    if (/\bworkflowStates\b/.test(query)) {
+      const { team } = variables as { team?: string };
+      const nodes = team === FAKE_TEAM ? statuses : [];
+      res.end(JSON.stringify({ data: { workflowStates: connection(nodes) } }));
+      return;
+    }
+    if (/\bissueLabels\b/.test(query)) {
+      const { team } = variables as { team?: string };
+      const nodes = team === FAKE_TEAM ? labels.map((name) => ({ name })) : [];
+      res.end(JSON.stringify({ data: { issueLabels: connection(nodes) } }));
+      return;
+    }
+    const filter = (variables as { filter?: unknown } | undefined)?.filter;
+    filters.push(filter);
+    let matching: FakeIssue[];
+    try {
+      matching = issues.filter((issue) => matches(issue, filter, statuses));
+    } catch (error) {
+      if (!(error instanceof UnsupportedFilter)) throw error;
+      res.statusCode = 400;
+      const message = `The fake Linear doesn't support the filter criterion ${error.message}`;
+      res.end(JSON.stringify({ errors: [{ message }] }));
+      return;
+    }
     const nodes = matching.map((issue) => ({
       url: `https://linear.app/acme/issue/${issue.identifier}`,
       description: null,
@@ -83,8 +191,10 @@ export async function fakeLinear(issues: FakeIssue[], { apiKey }: { apiKey?: str
       priority: 0,
       createdAt: new Date(0).toISOString(),
       ...issue,
-      // A team key isn't the SDK's team object, so leave it out.
+      // These aren't the SDK's team, state and label objects, so leave them out.
       team: undefined,
+      status: undefined,
+      labels: undefined,
       updatedAt: new Date(0).toISOString(),
       // The SDK's Issue model reads these unconditionally.
       sharedAccess: { isShared: false, sharedWithCount: 0, sharedWithUsers: [] },

@@ -19,6 +19,116 @@ export function createLinearClient(apiKey: string, signal: AbortSignal): LinearC
   return client;
 }
 
+/** Every node of a connection the query `field` returns, page by page. */
+async function readAll<T>(
+  client: LinearClient,
+  field: string,
+  query: string,
+  variables: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<T[]> {
+  type Page = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+  const nodes: T[] = [];
+  let after: string | null = null;
+  do {
+    signal.throwIfAborted();
+    const response: { data?: Record<string, Page> } = await client.client.rawRequest<
+      Record<string, Page>,
+      Record<string, unknown>
+    >(query, { ...variables, after });
+    const page: Page | undefined = response.data?.[field];
+    if (!page) throw new Error(`Linear returned no ${field}`);
+    nodes.push(...page.nodes);
+    after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+  } while (after);
+  return nodes;
+}
+
+const TEAM_STATUSES = `query TeamStatuses($team: String!, $after: String) {
+  workflowStates(filter: { team: { key: { eq: $team } } }, first: 250, after: $after) {
+    nodes { name }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+// A team's issues can carry its own labels and the workspace's, which belong to no team. A label
+// group is never on an issue itself, only its labels are, so groups aren't valid names.
+const TEAM_LABELS = `query TeamLabels($team: String!, $after: String) {
+  issueLabels(
+    filter: {
+      or: [{ team: { key: { eq: $team } } }, { team: { null: true } }]
+      isGroup: { eq: false }
+    }
+    first: 250
+    after: $after
+  ) {
+    nodes { name }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+/**
+ * Each of `names` as the team spells it, matched ignoring case. A name that matches nothing is an
+ * error listing the valid names.
+ */
+function resolveNames(
+  names: string[],
+  valid: string[],
+  what: { one: string; many: string; team: string },
+): string[] {
+  const byLowerCase = new Map(valid.map((name) => [name.toLowerCase(), name]));
+  const unknown = names.filter((name) => !byLowerCase.has(name.toLowerCase()));
+  if (unknown.length > 0) {
+    const list = unknown.map((name) => `"${name}"`).join(", ");
+    const sorted = [...byLowerCase.values()].sort((a, b) => a.localeCompare(b));
+    throw new Error(
+      `Team ${what.team} has no ${what.one} named ${list}. Valid ${what.many}: ${sorted.length > 0 ? sorted.join(", ") : "none"}`,
+    );
+  }
+  return [...new Set(names.map((name) => byLowerCase.get(name.toLowerCase())!))];
+}
+
+/**
+ * The `IssueFilter` for a team's issues that are in any of `status` and carry all of `label`,
+ * ANDed with `filter`. Status and label names are checked against the team first. The filter
+ * names them rather than holding their ids, so a status or label deleted and made again still
+ * matches.
+ */
+export async function teamIssueFilter(
+  client: LinearClient,
+  {
+    team,
+    status,
+    label,
+    filter,
+  }: { team: string; status?: string[]; label?: string[]; filter?: Record<string, unknown> },
+  signal: AbortSignal,
+): Promise<LinearDocument.IssueFilter> {
+  const read = (field: string, query: string) =>
+    readAll<{ name: string }>(client, field, query, { team }, signal).then((nodes) =>
+      nodes.map((node) => node.name),
+    );
+  const [statuses, labels] = await Promise.all([
+    status && read("workflowStates", TEAM_STATUSES),
+    label && read("issueLabels", TEAM_LABELS),
+  ]);
+  // Every team has workflow statuses, so none means there's no such team.
+  if (statuses?.length === 0) throw new Error(`No Linear team has the key "${team}"`);
+
+  const clauses: Record<string, unknown>[] = [{ team: { key: { eq: team } } }];
+  if (status && statuses) {
+    const names = resolveNames(status, statuses, { one: "status", many: "statuses", team });
+    clauses.push({ state: { name: { in: names } } });
+  }
+  if (label && labels) {
+    for (const name of resolveNames(label, labels, { one: "label", many: "labels", team })) {
+      clauses.push({ labels: { some: { name: { eqIgnoreCase: name } } } });
+    }
+  }
+  clauses.push(filter ?? {});
+  return { and: clauses } as LinearDocument.IssueFilter;
+}
+
 export async function listIssues(
   client: LinearClient,
   filter: LinearDocument.IssueFilter,
