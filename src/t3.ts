@@ -66,7 +66,7 @@ export interface T3Model {
 /** A Provider instance from T3's `server.getConfig`. */
 export interface T3Provider {
   instanceId: string;
-  displayName: string;
+  displayName?: string;
   enabled: boolean;
   models?: T3Model[];
 }
