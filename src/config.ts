@@ -97,9 +97,10 @@ export const KEYS = {
     type: "string",
     scope: "all",
     schema: z.string().min(1),
-    description: "the T3 Provider instance id to find `model` in",
+    description: "the T3 Provider to find `model` in: its instance id or display name",
     arg: "<provider>",
-    defaultText: "the one enabled Provider that offers `model`",
+    defaultText:
+      "the one enabled Provider that offers `model`, else the T3 project's default Provider",
   }),
   runtimeMode: declare({
     type: "string",

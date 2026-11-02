@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
+  DEFAULT_PROVIDERS,
   type FakeIssue,
   type FakeProvider,
   type FakeT3Options,
@@ -215,7 +216,11 @@ describe("cli", () => {
       ["--set-status <status>", "default: leave the status as it is", "local"],
       ["--comment [true|false]", "default: true", "all"],
       ["--model <model>", "default: the T3 project's default model", "all"],
-      ["--provider <provider>", "default: the one enabled Provider that offers `model`", "all"],
+      [
+        "--provider <provider>",
+        "default: the one enabled Provider that offers `model`, else the T3 project's default Provider",
+        "all",
+      ],
       ["--runtime-mode <mode>", "default: full-access", "all"],
       ["--workspace <local|worktree>", "default: worktree", "all"],
       ["--base-ref <ref>", "default: the repository's default branch, as T3 reports it", "all"],
@@ -937,8 +942,9 @@ describe("cli run against fake Linear and T3", () => {
     },
   );
 
-  const opusOn = (instanceId: string, enabled = true): FakeProvider => ({
+  const opusOn = (instanceId: string, enabled = true, displayName?: string): FakeProvider => ({
     instanceId,
+    displayName,
     enabled,
     models: [{ slug: `${instanceId}-opus`, name: "Opus", aliases: ["opus-5.5"] }],
   });
@@ -991,10 +997,152 @@ describe("cli run against fake Linear and T3", () => {
     expect(t3.launches).toEqual([]);
   });
 
+  const onProvider = (instanceId: string) => ({
+    ...project,
+    defaultModelSelection: { instanceId, model: "whatever" },
+  });
+
+  test("a model several Providers offer runs on the Provider of the T3 project's default model", async () => {
+    const { t3, dir, env } = await servers(
+      { providers: [opusOn("pi"), opusOn("claudeAgent")], projects: [onProvider("claudeAgent")] },
+      { provider: undefined },
+      [issues[0]!],
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once", "--model", "opus-5.5"])
+      .result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches[0]!.modelSelection).toEqual({
+      instanceId: "claudeAgent",
+      model: "claudeAgent-opus",
+    });
+  });
+
+  test("a T3 project default on a Provider that doesn't offer the model breaks no tie", async () => {
+    const { linear, t3, dir, env } = await servers(
+      {
+        providers: [opusOn("pi"), opusOn("claudeAgent"), ...DEFAULT_PROVIDERS.slice(1)],
+        projects: [onProvider("codex")],
+      },
+      { provider: undefined },
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once", "--model", "opus-5.5"])
+      .result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("pi-opus on pi");
+    expect(result.stderr).toContain("claudeAgent-opus on claudeAgent");
+    expect(linear.filters).toEqual([]);
+    expect(t3.launches).toEqual([]);
+  });
+
+  test.each(["pi", "PI", "Pi", "pi-agent"])(
+    "--provider %s selects Pi by display name or instance id",
+    async (provider) => {
+      const { t3, dir, env } = await servers(
+        { providers: [opusOn("pi-agent", true, "Pi"), opusOn("claudeAgent", true, "Claude")] },
+        { provider: undefined },
+        [issues[0]!],
+      );
+      const result = await startCli({ cwd: dir, env }, [
+        "run",
+        "--once",
+        "--model",
+        "opus-5.5",
+        "--provider",
+        provider,
+      ]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches[0]!.modelSelection).toEqual({
+        instanceId: "pi-agent",
+        model: "pi-agent-opus",
+      });
+    },
+  );
+
+  test("--provider by display name, with no model, matches the T3 project's default", async () => {
+    const defaultModelSelection = { instanceId: "claudeAgent", model: "claude-opus-5-5" };
+    const { t3, dir, env } = await servers(
+      { projects: [{ ...project, defaultModelSelection }] },
+      { provider: undefined, model: undefined },
+      [issues[0]!],
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once", "--provider", "claude"])
+      .result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches[0]!.modelSelection).toEqual(defaultModelSelection);
+  });
+
+  test.each([{ args: ["--model", "opus"] }, { args: [] }])(
+    "an unknown provider with $args fails listing the enabled Providers",
+    async ({ args }) => {
+      const { linear, t3, dir, env } = await servers(
+        {
+          providers: [...DEFAULT_PROVIDERS, { ...opusOn("pi", false), displayName: "Pi" }],
+          projects: [onProvider("claudeAgent")],
+        },
+        { provider: undefined, model: undefined },
+      );
+      const result = await startCli({ cwd: dir, env }, [
+        "run",
+        "--dry-run",
+        "--provider",
+        "nope",
+        ...args,
+      ]).result;
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('"nope"');
+      expect(result.stderr).toContain("Claude (claudeAgent), Codex (codex)");
+      expect(result.stderr).not.toContain("Pi");
+      expect(linear.filters).toEqual([]);
+      expect(t3.launches).toEqual([]);
+    },
+  );
+
+  test("a display name two enabled Providers share fails listing both", async () => {
+    const { linear, t3, dir, env } = await servers(
+      { providers: [opusOn("claudeAgent", true, "Claude"), opusOn("claudeWork", true, "Claude")] },
+      { provider: undefined },
+    );
+    const result = await startCli({ cwd: dir, env }, [
+      "run",
+      "--dry-run",
+      "--model",
+      "opus-5.5",
+      "--provider",
+      "claude",
+    ]).result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Claude (claudeAgent), Claude (claudeWork)");
+    expect(linear.filters).toEqual([]);
+    expect(t3.launches).toEqual([]);
+  });
+
+  test("a disabled Provider named by provider fails saying it is disabled", async () => {
+    const { dir, env } = await servers(
+      { providers: [...DEFAULT_PROVIDERS, opusOn("pi", false, "Pi")] },
+      { provider: undefined },
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--dry-run", "--provider", "pi"])
+      .result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("disabled");
+  });
+
+  test("--provider with no model, off the T3 project's default Provider, fails before the first poll", async () => {
+    const { linear, t3, dir, env } = await servers(
+      { projects: [onProvider("claudeAgent")] },
+      { provider: undefined, model: undefined },
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--dry-run", "--provider", "Codex"])
+      .result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('defaults to "whatever" on "claudeAgent"');
+    expect(linear.filters).toEqual([]);
+    expect(t3.launches).toEqual([]);
+  });
+
   test.each([
     { args: ["--model", "gpt-9"], searched: "claudeAgent, codex" },
     { args: ["--model", "gpt-5.5", "--provider", "claudeAgent"], searched: '"claudeAgent"' },
-    { args: ["--model", "opus", "--provider", "nope"], searched: '"nope"' },
   ])(
     "$args fails before the first poll, naming the Providers searched",
     async ({ args, searched }) => {

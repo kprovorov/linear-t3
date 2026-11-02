@@ -116,17 +116,42 @@ function workspaceFor(config: Config, issue: Issue): WorkspaceStrategy {
 }
 
 /**
+ * The enabled Provider `provider` names: its instance id, else its display name ignoring case.
+ * Throws, listing the enabled Providers, when none or several match.
+ */
+function resolveProvider(providers: T3Provider[], provider: string): T3Provider {
+  const enabled = providers.filter((p) => p.enabled);
+  const byId = enabled.find((p) => p.instanceId === provider);
+  if (byId) return byId;
+  const lower = provider.toLowerCase();
+  const named = (p: T3Provider) => p.displayName?.toLowerCase() === lower;
+  const byName = enabled.filter(named);
+  if (byName.length === 1) return byName[0]!;
+  const describe = (ps: T3Provider[]) =>
+    ps.map((p) => `${p.displayName ?? p.instanceId} (${p.instanceId})`).join(", ") || "none";
+  if (byName.length > 1) {
+    throw new Error(
+      `provider "${provider}" names several enabled T3 Providers: ${describe(byName)}. Pick one by instance id`,
+    );
+  }
+  const disabled = providers.some((p) => !p.enabled && (p.instanceId === provider || named(p)));
+  throw new Error(
+    `provider "${provider}" matches no enabled T3 Provider${disabled ? " (it is disabled in T3)" : ""}; the enabled ones are ${describe(enabled)}`,
+  );
+}
+
+/**
  * The Provider and exact slug for the model `model` names, among enabled Providers (only
- * `provider`, when set): the exact slug, else the name ignoring case, else an alias.
+ * `provider`, when set): the exact slug, else the name ignoring case, else an alias. When several
+ * Providers offer it, `preferred` (the T3 project's default Provider) wins if it's one of them.
  */
 function resolveModel(
   providers: T3Provider[],
   model: string,
-  provider: string | undefined,
+  provider: T3Provider | undefined,
+  preferred: string | undefined,
 ): { instanceId: string; model: string } {
-  const searched = providers.filter(
-    (p) => p.enabled && (provider === undefined || p.instanceId === provider),
-  );
+  const searched = provider ? [provider] : providers.filter((p) => p.enabled);
   const lower = model.toLowerCase();
   const tiers: ((m: T3Model) => boolean)[] = [
     (m) => m.slug === model,
@@ -141,19 +166,17 @@ function resolveModel(
     });
     if (candidates.length === 1) return candidates[0]!;
     if (candidates.length > 1) {
+      const tiebreak = candidates.find((c) => c.instanceId === preferred);
+      if (tiebreak) return tiebreak;
       const list = candidates.map((c) => `${c.model} on ${c.instanceId}`).join(", ");
       throw new Error(
         `Model "${model}" is offered by several T3 Providers: ${list}. Pick one with --provider`,
       );
     }
   }
-  const names = searched.map((p) => p.instanceId).join(", ");
-  const where =
-    provider === undefined
-      ? `the enabled T3 Providers (${names || "none"})`
-      : searched.length > 0
-        ? `T3 Provider "${provider}"`
-        : `T3 Provider "${provider}", which isn't an enabled Provider in T3`;
+  const where = provider
+    ? `T3 Provider "${provider.instanceId}"`
+    : `the enabled T3 Providers (${searched.map((p) => p.instanceId).join(", ") || "none"})`;
   throw new Error(`No model matches "${model}" in ${where}`);
 }
 
@@ -172,17 +195,36 @@ async function prepare(
   const closeOnShutdown = () => t3.close();
   shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
   try {
+    const needsCatalog = loaded.model !== undefined || loaded.provider !== undefined;
     const [shell, providers] = await Promise.all([
       t3.readShell(),
-      loaded.model === undefined ? undefined : t3.providers(),
+      needsCatalog ? t3.providers() : undefined,
     ]);
     const project = findProject(shell.projects, loaded);
-    if (loaded.model !== undefined && providers !== undefined) {
-      const { instanceId, model } = resolveModel(providers, loaded.model, loaded.provider);
-      if (model !== loaded.model || instanceId !== loaded.provider) {
-        log(`model "${loaded.model}" is ${model} on ${instanceId}`);
+    if (providers !== undefined) {
+      const provider =
+        loaded.provider === undefined ? undefined : resolveProvider(providers, loaded.provider);
+      if (loaded.model === undefined) {
+        if (provider) {
+          const fallback = project.defaultModelSelection;
+          if (fallback && provider.instanceId !== fallback.instanceId) {
+            throw new Error(
+              `provider is "${loaded.provider}" but no model is set, and T3 project "${project.title}" defaults to "${fallback.model}" on "${fallback.instanceId}"`,
+            );
+          }
+          if (provider.instanceId !== loaded.provider) {
+            log(`provider "${loaded.provider}" is ${provider.instanceId}`);
+          }
+          loaded = { ...loaded, provider: provider.instanceId };
+        }
+      } else {
+        const preferred = project.defaultModelSelection?.instanceId;
+        const { instanceId, model } = resolveModel(providers, loaded.model, provider, preferred);
+        if (model !== loaded.model || instanceId !== loaded.provider) {
+          log(`model "${loaded.model}" is ${model} on ${instanceId}`);
+        }
+        loaded = { ...loaded, model, provider: instanceId };
       }
-      loaded = { ...loaded, model, provider: instanceId };
     }
     if (loaded.workspace === "local" || loaded.baseRef !== undefined) {
       return { config: loaded, project };

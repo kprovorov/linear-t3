@@ -29,7 +29,7 @@ The saved tokens for each Integration. They're kept apart from the Config so the
 _Avoid_: env, secrets file
 
 **Provider**:
-A T3 agent backend that a thread runs on, such as Claude, Codex or Pi. Each Provider offers its own models, and the same model can be available through more than one Provider.
+A T3 agent backend that a thread runs on, such as Claude, Codex or Pi. Each Provider offers its own models, and the same model can be available through more than one Provider. `provider` names one by its instance id or its display name. When a model is on several enabled Providers and no `provider` is set, the Provider of the T3 project's default model wins if it offers the model.
 _Avoid_: harness, engine
 
 **Model alias**:
