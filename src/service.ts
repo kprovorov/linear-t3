@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
-import { resolve } from "node:path";
 import { promisify } from "node:util";
+import type { Values } from "./config.ts";
+import { flagArgs } from "./flags.ts";
 import type { Paths } from "./paths.ts";
 import { launchd } from "./launchd.ts";
 import { systemd } from "./systemd.ts";
@@ -30,8 +31,8 @@ export interface ServiceManager {
   /** Where to read the Daemon's output, for messages: a log file, or the command that shows it. */
   logLocation: string;
   installed(): boolean;
-  /** The `node` binary the installed unit runs. */
-  pinnedNode(): string | undefined;
+  /** What the installed unit runs, read back from it. */
+  pinned(): Unit | undefined;
   /** Writes or refreshes the unit, then enables and starts it. */
   install(unit: Unit): Promise<void>;
   /** Stops the Daemon and keeps it from starting at login. */
@@ -54,29 +55,63 @@ export function serviceManager(paths: Paths): ServiceManager {
   throw new ServiceError("The background service is macOS and Linux only");
 }
 
-// The Daemon reads these to find its files, so the service gets them when `start` had them.
+// The Daemon reads these to find its files, so the service gets them when `start` had them. The
+// Global Config is always pinned, as an absolute path.
 const PASSED_ENV = ["T3CODE_HOME", "LINEAR_T3_CONFIG", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
 
-/**
- * The unit that runs `cliPath run` with the current `node`, pinned to `localConfig` when there is
- * one. The Global Config is found again from the passed environment.
- */
-export function daemonUnit(cliPath: string, localConfig?: string, env = process.env): Unit {
+/** What `start` pins the Daemon to, so it runs the same from any working directory. */
+export interface Pinned {
+  /** The T3 project's id. */
+  project: string;
+  /** The Local Config, absolute, when there is one. */
+  localConfig?: string;
+  /** The Global Config, absolute. */
+  globalConfig: string;
+  /** The keys the flags set, but `project`, which is pinned by id. */
+  flags: Values;
+}
+
+const PROJECT_ARG = "--project=";
+const CONFIG_ARG = "--config=";
+// Without it, `run` would look for a Local Config wherever the service manager starts it.
+const NO_CONFIG_ARG = "--no-config";
+
+/** The unit that runs `cliPath run` with the current `node`, pinned to `pinned`. */
+export function daemonUnit(cliPath: string, pinned: Pinned, env = process.env): Unit {
+  const { project: _, ...flags } = pinned.flags;
   return {
     program: [
       process.execPath,
       cliPath,
       "run",
-      ...(localConfig === undefined ? [] : ["--config", localConfig]),
+      `${PROJECT_ARG}${pinned.project}`,
+      pinned.localConfig === undefined ? NO_CONFIG_ARG : `${CONFIG_ARG}${pinned.localConfig}`,
+      ...flagArgs(flags),
     ],
     env: Object.fromEntries(
       PASSED_ENV.flatMap((key) => {
-        const value = env[key];
-        if (!value) return [];
-        // The service runs from another directory, so a relative Global Config must be made absolute.
-        return [[key, key === "LINEAR_T3_CONFIG" ? resolve(value) : value] as const];
+        const value = key === "LINEAR_T3_CONFIG" ? pinned.globalConfig : env[key];
+        return value ? [[key, value] as const] : [];
       }),
     ),
+  };
+}
+
+/** What `unit` is pinned to, as `status` shows it. */
+export function pinnedTo(unit: Unit): {
+  project?: string;
+  localConfig?: string;
+  globalConfig?: string;
+} {
+  const { program } = unit;
+  const arg = (prefix: string) =>
+    program.find((word) => word.startsWith(prefix))?.slice(prefix.length);
+  // Units from before projects were pinned wrote `--config <path>`.
+  const legacyConfig = program.indexOf("--config");
+  return {
+    project: arg(PROJECT_ARG),
+    localConfig: arg(CONFIG_ARG) ?? (legacyConfig < 0 ? undefined : program[legacyConfig + 1]),
+    globalConfig: unit.env.LINEAR_T3_CONFIG,
   };
 }
 

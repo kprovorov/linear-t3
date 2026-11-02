@@ -1,7 +1,6 @@
-import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { loadConfig, type Config, type Values } from "./config.ts";
 import { EnvFile } from "./env-file.ts";
@@ -14,6 +13,7 @@ import {
   type LinearClient,
 } from "./linear.ts";
 import type { Paths } from "./paths.ts";
+import { findProject } from "./project.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import {
   T3Client,
@@ -40,60 +40,6 @@ function renderPrompt(template: string, issue: Issue): string {
     branchName: issue.branchName,
   };
   return template.replace(/\{(\w+)\}/g, (match, key: string) => vars[key] ?? match);
-}
-
-/** A folder path compared by where it leads: symlinks resolved, no trailing slash. */
-function normalizeFolder(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    // T3 may know folders this machine can't reach.
-    return resolve(path);
-  }
-}
-
-const describeProjects = (projects: T3Project[]) =>
-  projects.length === 0
-    ? "T3 has no projects"
-    : `Known projects: ${projects.map((p) => `"${p.title}" (${p.workspaceRoot})`).join(", ")}`;
-
-/**
- * The T3 project to watch: the one `project` names, by id, unique title or folder path, or else
- * the one whose folder is the Git root (or the working directory outside Git).
- */
-function findProject(projects: T3Project[], config: Config): T3Project {
-  const { project } = config;
-  // A relative path is relative to the Config file that set it.
-  const folder = "ref" in project ? resolve(project.base, project.ref) : project.folder;
-  const normalized = normalizeFolder(folder);
-  const matches = projects.filter((p) => normalizeFolder(p.workspaceRoot) === normalized);
-  if ("ref" in project) {
-    const byId = projects.find((p) => p.id === project.ref);
-    if (byId) return byId;
-    // An absolute path names its folder outright, ahead of any title spelled the same.
-    if (isAbsolute(project.ref) && matches.length === 1) return matches[0]!;
-    // Titles aren't unique; launching into the wrong workspace is worse than failing.
-    const byTitle = projects.filter((p) => p.title === project.ref);
-    if (byTitle.length === 1) return byTitle[0]!;
-    if (byTitle.length > 1) {
-      const roots = byTitle.map((p) => p.workspaceRoot).join(", ");
-      throw new Error(
-        `Several T3 projects are titled "${project.ref}" (${roots}); use the id or workspace path instead`,
-      );
-    }
-  }
-  if (matches.length === 1) return matches[0]!;
-  const fix = 'set "project" in the Local Config';
-  if (matches.length > 1) {
-    const ids = matches.map((p) => `"${p.title}" (id ${p.id})`).join(", ");
-    throw new Error(`Several T3 projects have the folder ${folder}: ${ids}. ${fix} to one's id`);
-  }
-  if ("ref" in project) {
-    throw new Error(`No T3 project matches "${project.ref}". ${describeProjects(projects)}`);
-  }
-  throw new Error(
-    `No T3 project has the folder ${folder}. Add it in T3, or ${fix}. ${describeProjects(projects)}`,
-  );
 }
 
 /** T3's projects and threads, from one snapshot. Shutdown ends the wait by closing the socket. */
@@ -442,8 +388,9 @@ function requireToken(key: string, credentials: EnvFile, integration: string): s
 
 export interface DaemonOptions {
   paths: Paths;
-  // `--config`: the Local Config to use instead of the one found from the working directory.
-  localConfig?: string;
+  // `--config`: the Local Config to use instead of the one found from the working directory;
+  // `false` for none.
+  localConfig?: string | false;
   // The keys the CLI flags set; they win over both Configs.
   flags?: Values;
   // Do one poll, then exit.

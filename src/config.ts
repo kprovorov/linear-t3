@@ -351,8 +351,8 @@ export async function loadGlobalConfig(
 export interface ConfigSources {
   /** The Global Config's path; a missing file is fine. */
   global: string;
-  /** `--config`: replaces discovery, and must exist. */
-  local?: string;
+  /** `--config`: replaces discovery, and must exist. `false` (`--no-config`): no Local Config. */
+  local?: string | false;
   /** Where to start looking for the Local Config, and what a relative path on the CLI is relative to. */
   cwd: string;
   /** The keys the CLI flags set, already validated. */
@@ -372,7 +372,12 @@ export async function loadConfig({
   flags = {},
   defaultState,
 }: ConfigSources): Promise<Config> {
-  const localPath = explicitLocal ? resolve(cwd, explicitLocal) : findLocalConfig(cwd);
+  const localPath =
+    explicitLocal === false
+      ? undefined
+      : explicitLocal
+        ? resolve(cwd, explicitLocal)
+        : findLocalConfig(cwd);
   if (localPath === resolve(globalPath)) {
     // Background services installed before the Local Config existed pass the Global one here.
     throw new ConfigError(

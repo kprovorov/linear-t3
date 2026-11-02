@@ -58,3 +58,17 @@ export function configFlags(options: Record<string, unknown>): Values {
     flagKeys.filter((key) => options[key] !== undefined).map((key) => [key, options[key]]),
   ) as Values;
 }
+
+/**
+ * `values` as the flags that set them, e.g. `--poll-interval=30`, in declaration order, for the
+ * background service to pass to `run`. `--key=value` so a value starting with `-` stays a value.
+ */
+export function flagArgs(values: Values): string[] {
+  return flagKeys.flatMap((key) => {
+    const value: unknown = values[key];
+    if (value === undefined) return [];
+    // Strings as typed; JSON writes booleans, numbers and filters the way their flags read them.
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    return [`--${flagName(key)}=${text}`];
+  });
+}
