@@ -66,7 +66,35 @@ function findProject(projects: T3Project[], config: Config): T3Project {
 function workspaceFor(config: Config, issue: Issue): WorkspaceStrategy {
   if (config.workspace === "local") return { type: "root" };
   const { baseRef, startFromOrigin } = config;
+  // resolveBaseRef fills it in before the first poll.
+  if (baseRef === undefined) throw new Error("baseRef is unresolved");
   return { type: "worktree", baseRef, startFromOrigin, branch: issue.branchName };
+}
+
+/**
+ * `config` with `baseRef` set: as configured, else the T3 project's default branch. Worktrees
+ * need it; `workspace: local` creates none, so it isn't looked up.
+ */
+async function resolveBaseRef(config: Config, t3Token: string): Promise<Config> {
+  if (config.workspace === "local" || config.baseRef !== undefined) return config;
+  const t3 = await T3Client.connect(config.t3Url, t3Token, shutdown.signal);
+  // Shutdown ends the wait for T3 by closing the socket.
+  const closeOnShutdown = () => t3.close();
+  shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
+  try {
+    const project = findProject((await t3.readShell()).projects, config);
+    const baseRef = await t3.defaultBranch(project.workspaceRoot);
+    if (baseRef === undefined) {
+      throw new Error(
+        `T3 reports no default branch for "${project.title}" (${project.workspaceRoot}); set the branch new worktrees start from with --base-ref or baseRef`,
+      );
+    }
+    log(`worktrees branch from ${baseRef}, the default branch of "${project.title}"`);
+    return { ...config, baseRef };
+  } finally {
+    shutdown.signal.removeEventListener("abort", closeOnShutdown);
+    t3.close();
+  }
 }
 
 async function threadLink(config: Config, threadId: string): Promise<string> {
@@ -392,7 +420,7 @@ export async function runDaemon({
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
 
-  const config = await loadConfig({
+  const loaded = await loadConfig({
     global: paths.globalConfig,
     local: localConfig,
     cwd: process.cwd(),
@@ -402,6 +430,7 @@ export async function runDaemon({
   const linearKey = requireToken("LINEAR_API_KEY", credentials, "linear");
   const linear = createLinearClient(linearKey, shutdown.signal);
   const t3Token = requireToken("T3_TOKEN", credentials, "t3");
+  const config = await resolveBaseRef(loaded, t3Token);
   const state = new StateStore(config.stateFile);
   // A dry run launches nothing, so it never writes State.
   await state.load({ checkWritable: !dryRun });

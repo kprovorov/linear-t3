@@ -106,6 +106,20 @@ export class T3RpcFailure extends Error {}
 /** A launch failed and T3's state confirms the thread doesn't exist (never created, or deleted). */
 export class T3ThreadNotCreated extends Error {}
 
+/** The running T3 lacks an RPC linear-t3 needs. */
+export class T3Incompatible extends Error {
+  constructor(tag: string) {
+    super(`This T3 doesn't support ${tag}, which linear-t3 needs. Update T3 Code and try again`);
+  }
+}
+
+// The most refs T3 returns per `vcs.listRefs` page.
+const LIST_REFS_LIMIT = 200;
+
+/** Whether `error` is the server saying it has no RPC named `tag`. */
+const unknownTag = (error: unknown, tag: string) =>
+  error instanceof Error && error.message.includes(`Unknown request tag: ${tag}`);
+
 interface ShellSnapshot extends T3Shell {
   // Only in some T3 versions; archived threads also come from getArchivedShellSnapshot.
   archivedThreads?: { id: string }[];
@@ -268,6 +282,30 @@ export class T3Client {
   async readShell(): Promise<T3Shell> {
     const { projects, threads } = await this.shellSnapshot();
     return { projects, threads };
+  }
+
+  /**
+   * The default branch of the Git repository at `cwd`, as T3 reports it, or undefined when T3
+   * marks none. Throws T3Incompatible when this T3 can't list refs.
+   */
+  async defaultBranch(cwd: string): Promise<string | undefined> {
+    let cursor: number | undefined;
+    do {
+      const page = (await this.call("vcs.listRefs", {
+        cwd,
+        refKind: "local",
+        limit: LIST_REFS_LIMIT,
+        ...(cursor !== undefined && { cursor }),
+      }).catch((error: unknown) => {
+        throw unknownTag(error, "vcs.listRefs") ? new T3Incompatible("vcs.listRefs") : error;
+      })) as { refs: { name: string; isDefault: boolean }[]; nextCursor: number | null };
+      const found = page.refs.find((ref) => ref.isDefault);
+      if (found) return found.name;
+      // A cursor that doesn't advance would page forever.
+      cursor =
+        page.nextCursor !== null && page.nextCursor > (cursor ?? -1) ? page.nextCursor : undefined;
+    } while (cursor !== undefined);
+    return undefined;
   }
 
   /** Whether T3 has the thread, active or archived. Deleted threads are absent from both snapshots. */

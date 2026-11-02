@@ -105,8 +105,8 @@ export const KEYS = {
     type: "string",
     scope: "all",
     schema: z.string().min(1),
-    fallback: "main",
-    description: "the ref new worktrees branch from",
+    description:
+      "the ref new worktrees branch from (default: the repository's default branch, as T3 reports it)",
   }),
   startFromOrigin: declare({
     type: "boolean",
@@ -175,7 +175,8 @@ export interface Config {
   provider?: string;
   runtimeMode: Value<"runtimeMode">;
   workspace: Value<"workspace">;
-  baseRef: string;
+  /** Unset: the repository's default branch, which the Daemon asks T3 for. */
+  baseRef?: string;
   startFromOrigin: boolean;
   prompt: string;
   pollInterval: number;
@@ -379,7 +380,7 @@ export async function loadConfig({
     provider: get("provider"),
     runtimeMode: required("runtimeMode"),
     workspace: required("workspace"),
-    baseRef: required("baseRef"),
+    baseRef: get("baseRef"),
     startFromOrigin: required("startFromOrigin"),
     prompt: required("prompt"),
     pollInterval: required("pollInterval"),

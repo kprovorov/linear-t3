@@ -184,11 +184,29 @@ export interface FakeT3Options {
   token?: string;
   /** Called for each launch; the launch succeeds once it resolves. */
   onLaunch?: (payload: Record<string, unknown>) => Promise<void>;
+  /**
+   * The Git refs `vcs.listRefs` reports for every folder, one page at a time, as T3 0.1.6 does.
+   * Defaults to one page holding a default `main`. `null`: a T3 without `vcs.listRefs`.
+   */
+  refPages?: FakeRef[][] | null;
+}
+
+export interface FakeRef {
+  name: string;
+  isDefault?: boolean;
 }
 
 /** A T3 Code server: the websocket ticket endpoint plus the shell and launch RPCs. */
-export async function fakeT3({ projects, threads = [], token, onLaunch }: FakeT3Options) {
+export async function fakeT3({
+  projects,
+  threads = [],
+  token,
+  onLaunch,
+  refPages = [[{ name: "main", isDefault: true }]],
+}: FakeT3Options) {
   const requests: string[] = [];
+  // Every RPC received, in order.
+  const rpcs: { tag: string; payload: Record<string, unknown> }[] = [];
   const launches: Record<string, unknown>[] = [];
   const sockets = new Set<Duplex>();
   const server = createServer((req, res) => {
@@ -233,6 +251,7 @@ export async function fakeT3({ projects, threads = [], token, onLaunch }: FakeT3
         if (opcode !== 0x1) continue;
         const message = JSON.parse(text) as RpcRequest;
         if (message._tag !== "Request") continue;
+        rpcs.push({ tag: message.tag, payload: message.payload });
         if (message.tag === "orchestration.subscribeShell") {
           const snapshot = {
             projects,
@@ -256,6 +275,31 @@ export async function fakeT3({ projects, threads = [], token, onLaunch }: FakeT3
           void (onLaunch?.(message.payload) ?? Promise.resolve()).then(() =>
             exit(message.id, { threadId: message.payload.threadId, resumed: false }),
           );
+        } else if (message.tag === "vcs.listRefs" && refPages) {
+          const { cwd, cursor = 0 } = message.payload as { cwd: string; cursor?: number };
+          const page = refPages[cursor] ?? [];
+          exit(message.id, {
+            isRepo: true,
+            hasPrimaryRemote: true,
+            refs: page.map((ref) => ({
+              current: false,
+              isDefault: false,
+              worktreePath: ref.isDefault ? cwd : null,
+              ...ref,
+            })),
+            nextCursor: cursor + 1 < refPages.length ? cursor + 1 : null,
+            totalCount: refPages.flat().length,
+          });
+        } else {
+          // What T3 0.1.6 answers to a request tag it doesn't have.
+          send({
+            _tag: "Exit",
+            requestId: message.id,
+            exit: {
+              _tag: "Failure",
+              cause: [{ _tag: "Die", defect: `Unknown request tag: ${message.tag}` }],
+            },
+          });
         }
       }
     });
@@ -266,6 +310,7 @@ export async function fakeT3({ projects, threads = [], token, onLaunch }: FakeT3
   return {
     url,
     requests,
+    rpcs,
     launches,
     close: () => {
       for (const socket of sockets) socket.destroy();

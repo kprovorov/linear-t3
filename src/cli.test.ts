@@ -703,6 +703,58 @@ describe("cli run against fake Linear and T3", () => {
     const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(t3.launches[0]!.workspaceStrategy).toEqual({ type: "root" });
+    expect(t3.rpcs.map((rpc) => rpc.tag)).not.toContain("vcs.listRefs");
+  });
+
+  const listRefsCalls = (t3: { rpcs: { tag: string; payload: unknown }[] }) =>
+    t3.rpcs.filter((rpc) => rpc.tag === "vcs.listRefs").map((rpc) => rpc.payload);
+
+  test("without baseRef, worktrees branch from the default branch T3 reports", async () => {
+    const { t3, dir, env } = await servers(
+      { refPages: [[{ name: "feature" }], [{ name: "master", isDefault: true }]] },
+      {},
+      issues,
+    );
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches.map((launch) => launch.workspaceStrategy)).toEqual([
+      { type: "worktree", baseRef: "master", startFromOrigin: true, branch: "eng-1" },
+      { type: "worktree", baseRef: "master", startFromOrigin: true, branch: "eng-2" },
+    ]);
+    // Asked once, before the first poll, on the project's folder, a page at a time.
+    expect(listRefsCalls(t3)).toEqual([
+      expect.objectContaining({ cwd: "/work/my-app" }),
+      expect.objectContaining({ cwd: "/work/my-app", cursor: 1 }),
+    ]);
+  });
+
+  test("an explicit baseRef is used as given, without asking T3", async () => {
+    const { t3, dir, env } = await servers({ refPages: null }, {}, [issues[0]!], {
+      baseRef: "release",
+    });
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches[0]!.workspaceStrategy).toMatchObject({ baseRef: "release" });
+    expect(listRefsCalls(t3)).toEqual([]);
+  });
+
+  test("no default branch fails before the first poll, asking for --base-ref", async () => {
+    const { linear, t3, dir, env } = await servers({ refPages: [[{ name: "feature" }]] });
+    const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--base-ref");
+    expect(result.stderr).toContain("/work/my-app");
+    expect(linear.filters).toEqual([]);
+    expect(t3.launches).toEqual([]);
+  });
+
+  test("a T3 without vcs.listRefs fails with a compatibility error, not a guess", async () => {
+    const { linear, t3, dir, env } = await servers({ refPages: null });
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/T3 .*vcs\.listRefs.*update T3/i);
+    expect(linear.filters).toEqual([]);
+    expect(t3.launches).toEqual([]);
   });
 
   test("without a model, threads use the T3 project's default model, options included", async () => {
@@ -774,11 +826,12 @@ describe("cli run against fake Linear and T3", () => {
     expect(t3.launches).toHaveLength(2);
   });
 
-  test("a project T3 doesn't have fails the poll and exits non-zero", async () => {
-    const { t3, dir, env } = await servers({}, {}, issues, { project: "missing" });
+  test("a project T3 doesn't have fails before the first poll and exits non-zero", async () => {
+    const { linear, t3, dir, env } = await servers({}, {}, issues, { project: "missing" });
     const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
     expect(result.status).toBe(1);
-    expect(result.stdout).toContain('No T3 project matches "missing"');
+    expect(result.stderr).toContain('No T3 project matches "missing"');
+    expect(linear.filters).toEqual([]);
     expect(t3.launches).toEqual([]);
   });
 
