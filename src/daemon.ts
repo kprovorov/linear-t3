@@ -1,6 +1,7 @@
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { loadConfig, type Config } from "./config.ts";
 import { EnvFile } from "./env-file.ts";
@@ -41,48 +42,95 @@ function renderPrompt(template: string, issue: Issue): string {
   return template.replace(/\{(\w+)\}/g, (match, key: string) => vars[key] ?? match);
 }
 
-/** The T3 project `config.project` names: by id, folder path, or unique title. */
-function findProject(projects: T3Project[], config: Config): T3Project {
-  const ref = config.project;
-  const exact = projects.find((p) => p.id === ref || p.workspaceRoot === ref);
-  if (exact) return exact;
-  // Titles aren't unique; launching into the wrong workspace is worse than failing.
-  const byTitle = projects.filter((p) => p.title === ref);
-  if (byTitle.length === 1) return byTitle[0]!;
-  if (byTitle.length > 1) {
-    const roots = byTitle.map((p) => p.workspaceRoot).join(", ");
-    throw new Error(
-      `Several T3 projects are titled "${ref}" (${roots}); use the id or workspace path instead`,
-    );
+/** A folder path compared by where it leads: symlinks resolved, no trailing slash. */
+function normalizeFolder(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    // T3 may know folders this machine can't reach.
+    return resolve(path);
   }
+}
+
+const describeProjects = (projects: T3Project[]) =>
+  projects.length === 0
+    ? "T3 has no projects"
+    : `Known projects: ${projects.map((p) => `"${p.title}" (${p.workspaceRoot})`).join(", ")}`;
+
+/**
+ * The T3 project to watch: the one `project` names, by id, unique title or folder path, or else
+ * the one whose folder is the Git root (or the working directory outside Git).
+ */
+function findProject(projects: T3Project[], config: Config): T3Project {
+  const { project } = config;
   // A relative path is relative to the Config file that set it.
-  const folder = resolve(config.projectBase, ref);
-  const byFolder = projects.find((p) => p.workspaceRoot === folder);
-  if (byFolder) return byFolder;
-  const known = projects.map((p) => `"${p.title}" (${p.workspaceRoot})`).join(", ");
-  throw new Error(`No T3 project matches "${ref}". Known projects: ${known}`);
+  const folder = "ref" in project ? resolve(project.base, project.ref) : project.folder;
+  const normalized = normalizeFolder(folder);
+  const matches = projects.filter((p) => normalizeFolder(p.workspaceRoot) === normalized);
+  if ("ref" in project) {
+    const byId = projects.find((p) => p.id === project.ref);
+    if (byId) return byId;
+    // An absolute path names its folder outright, ahead of any title spelled the same.
+    if (isAbsolute(project.ref) && matches.length === 1) return matches[0]!;
+    // Titles aren't unique; launching into the wrong workspace is worse than failing.
+    const byTitle = projects.filter((p) => p.title === project.ref);
+    if (byTitle.length === 1) return byTitle[0]!;
+    if (byTitle.length > 1) {
+      const roots = byTitle.map((p) => p.workspaceRoot).join(", ");
+      throw new Error(
+        `Several T3 projects are titled "${project.ref}" (${roots}); use the id or workspace path instead`,
+      );
+    }
+  }
+  if (matches.length === 1) return matches[0]!;
+  const fix = 'set "project" in the Local Config';
+  if (matches.length > 1) {
+    const ids = matches.map((p) => `"${p.title}" (id ${p.id})`).join(", ");
+    throw new Error(`Several T3 projects have the folder ${folder}: ${ids}. ${fix} to one's id`);
+  }
+  if ("ref" in project) {
+    throw new Error(`No T3 project matches "${project.ref}". ${describeProjects(projects)}`);
+  }
+  throw new Error(
+    `No T3 project has the folder ${folder}. Add it in T3, or ${fix}. ${describeProjects(projects)}`,
+  );
+}
+
+/** T3's projects and threads, from one snapshot. Shutdown ends the wait by closing the socket. */
+async function readShell(t3: T3Client) {
+  const closeOnShutdown = () => t3.close();
+  shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
+  return t3
+    .readShell()
+    .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
 }
 
 function workspaceFor(config: Config, issue: Issue): WorkspaceStrategy {
   if (config.workspace === "local") return { type: "root" };
   const { baseRef, startFromOrigin } = config;
-  // resolveBaseRef fills it in before the first poll.
+  // prepare fills it in before the first poll.
   if (baseRef === undefined) throw new Error("baseRef is unresolved");
   return { type: "worktree", baseRef, startFromOrigin, branch: issue.branchName };
 }
 
 /**
- * `config` with `baseRef` set: as configured, else the T3 project's default branch. Worktrees
- * need it; `workspace: local` creates none, so it isn't looked up.
+ * Before the first poll: the T3 project this run watches, and `config` with `baseRef` set, as
+ * configured or else the project's default branch. Worktrees need it; `workspace: local` creates
+ * none, so it isn't looked up.
  */
-async function resolveBaseRef(config: Config, t3Token: string): Promise<Config> {
-  if (config.workspace === "local" || config.baseRef !== undefined) return config;
-  const t3 = await T3Client.connect(config.t3Url, t3Token, shutdown.signal);
+async function prepare(
+  loaded: Config,
+  t3Token: string,
+): Promise<{ config: Config; project: T3Project }> {
+  const t3 = await T3Client.connect(loaded.t3Url, t3Token, shutdown.signal);
   // Shutdown ends the wait for T3 by closing the socket.
   const closeOnShutdown = () => t3.close();
   shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
   try {
-    const project = findProject((await t3.readShell()).projects, config);
+    const project = findProject((await t3.readShell()).projects, loaded);
+    if (loaded.workspace === "local" || loaded.baseRef !== undefined) {
+      return { config: loaded, project };
+    }
     const baseRef = await t3.defaultBranch(project.workspaceRoot);
     if (baseRef === undefined) {
       throw new Error(
@@ -90,7 +138,7 @@ async function resolveBaseRef(config: Config, t3Token: string): Promise<Config> 
       );
     }
     log(`worktrees branch from ${baseRef}, the default branch of "${project.title}"`);
-    return { ...config, baseRef };
+    return { config: { ...loaded, baseRef }, project };
   } finally {
     shutdown.signal.removeEventListener("abort", closeOnShutdown);
     t3.close();
@@ -329,19 +377,15 @@ async function launchCandidates(
   const { config, linear, state, t3Token, dryRun } = ctx;
   const t3 = await T3Client.connect(config.t3Url, t3Token, shutdown.signal);
   try {
-    // Shutdown may arrive while reading projects; closing the socket ends that wait.
-    const closeOnShutdown = () => t3.close();
-    shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
-    const { projects, threads } = await t3
-      .readShell()
-      .finally(() => shutdown.signal.removeEventListener("abort", closeOnShutdown));
+    const { projects, threads } = await readShell(t3);
     // Running threads in T3, plus new threads this poll, which count as Running until the next
     // snapshot.
     let runningInT3 = threads.filter(isRunningThread).length;
     const cap = config.maxRunningThreads;
     const threadIds = new Set(threads.map((thread) => thread.id));
     if (dryRun) log(`T3 has ${runningInT3}${cap === undefined ? "" : `/${cap}`} running`);
-    // An unknown project fails the poll, even when nothing has room.
+    // Matched again each poll, so a project re-added in T3 is picked up. One gone since the run
+    // started fails the poll, even when nothing has room.
     const project = findProject(projects, config);
     // Keep going past failures, so one can't block later candidates.
     for (const issue of candidates) {
@@ -430,12 +474,20 @@ export async function runDaemon({
   const linearKey = requireToken("LINEAR_API_KEY", credentials, "linear");
   const linear = createLinearClient(linearKey, shutdown.signal);
   const t3Token = requireToken("T3_TOKEN", credentials, "t3");
-  const config = await resolveBaseRef(loaded, t3Token);
+  let prepared: Awaited<ReturnType<typeof prepare>>;
+  try {
+    prepared = await prepare(loaded, t3Token);
+  } catch (error) {
+    // Ctrl+C while connecting isn't a failure.
+    if (shutdown.signal.aborted) return;
+    throw error;
+  }
+  const { config, project } = prepared;
   const state = new StateStore(config.stateFile);
   // A dry run launches nothing, so it never writes State.
   await state.load({ checkWritable: !dryRun });
 
-  log(`watching ${config.team} -> ${config.project}`);
+  log(`watching ${config.team} -> ${project.title}`);
   while (!shutdown.signal.aborted) {
     try {
       await poll(config, linear, state, t3Token, dryRun);

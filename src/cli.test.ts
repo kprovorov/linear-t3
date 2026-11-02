@@ -366,11 +366,6 @@ describe("cli run", () => {
       local: { team: undefined },
       errors: (f) => [`Missing "team": set it in the Local Config (${f.local})`],
     },
-    {
-      case: "no project",
-      local: { project: undefined },
-      errors: (f) => [`Missing "project": set it in the Local Config (${f.local})`],
-    },
   ])(
     "$case exits non-zero with an error naming the file and the fix",
     ({ global, local, errors }) => {
@@ -410,7 +405,7 @@ describe("cli run", () => {
     const result = runCliIn({ cwd: join(parent, "repo"), env: tokens }, "run", "--once");
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      `Missing "project": set it in the Local Config (${LOCAL} in the repository)`,
+      `Missing "team": set it in the Local Config (${LOCAL} in the repository)`,
     );
   });
 
@@ -421,7 +416,7 @@ describe("cli run", () => {
     const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
     const result = runCliIn({ cwd: join(parent, "sub"), env: tokens }, "run", "--once");
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('Missing "project"');
+    expect(result.stderr).toContain('Missing "team"');
   });
 });
 
@@ -809,6 +804,89 @@ describe("cli run against fake Linear and T3", () => {
     expect(t3.launches.map((launch) => launch.projectId)).toEqual(["repo", "repo"]);
   });
 
+  describe("with no project set", () => {
+    test("launches into the T3 project whose folder is the Git root, run from a subdirectory", async () => {
+      const projects: FakeT3Options["projects"] = [project];
+      const { t3, dir, env } = await servers({ projects }, {}, issues, { project: undefined });
+      // T3 may report the folder with a trailing slash.
+      projects.push({ id: "repo", title: "repo", workspaceRoot: `${dir}/` });
+      const sub = join(dir, "src", "deep");
+      mkdirSync(sub, { recursive: true });
+      const result = await startCli({ cwd: sub, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain("watching ENG -> repo");
+      expect(t3.launches.map((launch) => launch.projectId)).toEqual(["repo", "repo"]);
+    });
+
+    test("matches a T3 project whose folder is a symlink to the Git root", async () => {
+      const projects: FakeT3Options["projects"] = [];
+      const { t3, dir, env } = await servers({ projects }, {}, issues, { project: undefined });
+      const link = join(mkdtempSync(join(tmpdir(), "linear-t3-link-")), "repo");
+      symlinkSync(dir, link);
+      projects.push({ id: "repo", title: "repo", workspaceRoot: link });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches.map((launch) => launch.projectId)).toEqual(["repo", "repo"]);
+    });
+
+    test("outside Git, uses the T3 project whose folder is the working directory", async () => {
+      const projects: FakeT3Options["projects"] = [];
+      const { t3, dir, env } = await servers({ projects }, {}, issues, { project: undefined });
+      rmSync(join(dir, ".git"), { recursive: true });
+      projects.push({ id: "dir", title: "dir", workspaceRoot: dir });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches.map((launch) => launch.projectId)).toEqual(["dir", "dir"]);
+    });
+
+    test("a folder no T3 project has exits non-zero before polling Linear, naming the folder", async () => {
+      const { linear, t3, dir, env } = await servers({}, {}, issues, { project: undefined });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`No T3 project has the folder ${dir}`);
+      expect(result.stderr).toContain('"my-app" (/work/my-app)');
+      expect(linear.filters).toEqual([]);
+      expect(t3.launches).toEqual([]);
+    });
+
+    test("two T3 projects with the folder exit non-zero, asking for project", async () => {
+      const projects: FakeT3Options["projects"] = [];
+      const { linear, t3, dir, env } = await servers({ projects }, {}, issues, {
+        project: undefined,
+      });
+      projects.push(
+        { id: "a", title: "one", workspaceRoot: dir },
+        { id: "b", title: "two", workspaceRoot: dir },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`Several T3 projects have the folder ${dir}`);
+      expect(result.stderr).toContain('set "project" in the Local Config to one');
+      expect(linear.filters).toEqual([]);
+      expect(t3.launches).toEqual([]);
+    });
+  });
+
+  test("an explicit project skips inference, even inside another T3 project's repository", async () => {
+    const projects: FakeT3Options["projects"] = [project];
+    const { t3, dir, env } = await servers({ projects }, {}, issues, { project: "my-app" });
+    projects.push({ id: "repo", title: "repo", workspaceRoot: dir });
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches.map((launch) => launch.projectId)).toEqual(["project-1", "project-1"]);
+  });
+
+  test("an absolute project path wins over a project titled the same", async () => {
+    const projects: FakeT3Options["projects"] = [
+      { id: "titled", title: "/work/my-app", workspaceRoot: "/work/elsewhere" },
+      { id: "rooted", title: "app", workspaceRoot: "/work/my-app" },
+    ];
+    const { t3, dir, env } = await servers({ projects }, {}, issues, { project: "/work/my-app" });
+    const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(t3.launches.map((launch) => launch.projectId)).toEqual(["rooted", "rooted"]);
+  });
+
   test("--config replaces the discovered Local Config", async () => {
     // The discovered one names a project T3 doesn't have.
     const { t3, dir, env } = await servers({}, {}, issues, { project: "missing" });
@@ -1193,7 +1271,12 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
     {
       case: "no Local Config",
       breaks: (f) => rmSync(f.local!),
-      fix: /Missing "project"[\s\S]*fix it, then run `linear-t3 start` again/,
+      fix: /Missing "team"[\s\S]*fix it, then run `linear-t3 start` again/,
+    },
+    {
+      case: "no project, which the service can't infer",
+      breaks: (f) => writeFile(f.local!, JSON.stringify({ team: "ENG" })),
+      fix: /can't infer the T3 project from [\s\S]*set "project" in [\s\S]*run `linear-t3 start` again/,
     },
     {
       case: "an invalid Global Config",

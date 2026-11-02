@@ -1,4 +1,4 @@
-import { loadConfig } from "./config.ts";
+import { LOCAL_CONFIG_NAME, loadConfig } from "./config.ts";
 import type { CheckResult } from "./connect.ts";
 import { checkT3Token, t3BaseUrl } from "./connect-t3.ts";
 import { EnvFile } from "./env-file.ts";
@@ -46,6 +46,13 @@ export async function preflight(
     });
     t3Url = config.t3Url;
     pinned = config.files.local;
+    if ("folder" in config.project) {
+      // The service doesn't run in this folder, so it can't infer the T3 project from it.
+      const where = config.files.local ?? `a ${LOCAL_CONFIG_NAME} in the repository`;
+      problems.push(
+        `The background service can't infer the T3 project from ${config.project.folder}: set "project" in ${where}, then run \`linear-t3 start\` again`,
+      );
+    }
   } catch (error) {
     problems.push(`${message(error)}\n  fix it, then run \`linear-t3 start\` again`);
   }

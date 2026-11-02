@@ -44,7 +44,7 @@ export const KEYS = {
     scope: "local",
     schema: z.string().min(1),
     description:
-      "the T3 project to launch threads in: its id, folder path (relative to this file) or unique title",
+      "the T3 project to launch threads in: its id, folder path (relative to this file) or unique title (default: the T3 project whose folder is the Git root)",
   }),
   team: declare({
     type: "string",
@@ -164,9 +164,11 @@ interface Layer {
 
 /** The effective Config for a run: every key resolved, plus where the files are. */
 export interface Config {
-  project: string;
-  /** The folder a relative `project` path resolves against: that of the file that set it. */
-  projectBase: string;
+  /**
+   * The T3 project to watch: named by `project`, with the folder a relative path resolves against
+   * (that of the file that set it), or else the folder whose T3 project to infer.
+   */
+  project: { ref: string; base: string } | { folder: string };
   team: string;
   filter?: Value<"filter">;
   setStatus?: string;
@@ -284,7 +286,7 @@ async function readLayer(
 }
 
 /** The Git root holding `dir`, or `undefined` outside a Git repository. */
-function gitRoot(dir: string): string | undefined {
+export function gitRoot(dir: string): string | undefined {
   for (let current = resolve(dir); ; current = dirname(current)) {
     if (existsSync(join(current, ".git"))) return current;
     if (dirname(current) === current) return undefined;
@@ -370,8 +372,10 @@ export async function loadConfig({
   const project = pick("project");
   const stateFile = get("stateFile");
   return {
-    project: required("project"),
-    projectBase: project.layer ? dirname(project.layer.path) : cwd,
+    project:
+      project.value === undefined
+        ? { folder: gitRoot(cwd) ?? resolve(cwd) }
+        : { ref: project.value, base: project.layer ? dirname(project.layer.path) : cwd },
     team: required("team"),
     filter: get("filter"),
     setStatus: get("setStatus"),
