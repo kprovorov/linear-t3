@@ -225,9 +225,10 @@ describe("cli", () => {
     for (const [flag, fallback, scope] of flags) {
       expect(help).toContain(flag);
       const after = help.slice(help.indexOf(flag));
-      expect(after.slice(0, after.indexOf(")") + 1)).toMatch(
-        new RegExp(`\\(${fallback.replace(/[|()]/g, "\\$&")}; scope: ${scope}\\)$`),
-      );
+      // The flag's own help ends at its first ")": the default and scope.
+      expect(
+        after.slice(0, after.indexOf(")") + 1).endsWith(`(${fallback}; scope: ${scope})`),
+      ).toBe(true);
     }
     for (const flag of ["--max-running-threads", "--t3-url", "--state-file"]) {
       expect(help).not.toContain(flag);
