@@ -1,8 +1,10 @@
-import { LOCAL_CONFIG_NAME, loadConfig } from "./config.ts";
+import { type Config, type Values, loadConfig } from "./config.ts";
 import type { CheckResult } from "./connect.ts";
 import { checkT3Token, t3BaseUrl } from "./connect-t3.ts";
 import { EnvFile } from "./env-file.ts";
 import type { Paths } from "./paths.ts";
+import { findProject } from "./project.ts";
+import { T3Client, type T3Project } from "./t3.ts";
 import { checkLinear } from "./token-check.ts";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -25,36 +27,50 @@ async function checkToken(
     : reason;
 }
 
+const fixThenStart = (error: unknown) =>
+  `${message(error)}\n  fix it, then run \`linear-t3 start\` again`;
+
+// How long to wait for T3's projects once connected.
+const SHELL_TIMEOUT_MS = 30_000;
+
+/** The T3 project `config` names, or infers from its folder, as T3 reports it now. */
+async function resolveProject(config: Config, t3Token: string): Promise<T3Project> {
+  const t3 = await T3Client.connect(config.t3Url, t3Token, new AbortController().signal);
+  // Closing the socket ends a wait for a snapshot that never comes.
+  const timer = setTimeout(() => t3.close(), SHELL_TIMEOUT_MS);
+  try {
+    const shell = await t3.readShell().catch((error: unknown) => {
+      throw new Error(`T3 at ${config.t3Url} didn't list its projects: ${message(error)}`);
+    });
+    return findProject(shell.projects, config);
+  } finally {
+    clearTimeout(timer);
+    t3.close();
+  }
+}
+
 /**
  * Everything that would stop the background Daemon from starting: an invalid or incomplete Config,
- * a token missing from the Credentials, or one its Integration rejects or can't check. Each problem
- * names its fix. Also says which Local Config the Daemon should be pinned to, if any.
+ * a token missing from the Credentials, one its Integration rejects or can't check, or no T3
+ * project to watch. Each problem names its fix. Otherwise, the T3 project to pin the Daemon to,
+ * and the Local Config it read, if any.
  */
 export async function preflight(
   paths: Paths,
-  localConfig: string | undefined,
-): Promise<{ problems: string[]; localConfig?: string }> {
+  { localConfig, flags }: { localConfig?: string | false; flags: Values },
+): Promise<{ problems: string[]; localConfig?: string; project?: T3Project }> {
   const problems: string[] = [];
-  let t3Url: string | undefined;
-  let pinned: string | undefined;
+  let config: Config | undefined;
   try {
-    const config = await loadConfig({
+    config = await loadConfig({
       global: paths.globalConfig,
       local: localConfig,
       cwd: process.cwd(),
+      flags,
       defaultState: paths.defaultState,
     });
-    t3Url = config.t3Url;
-    pinned = config.files.local;
-    if ("folder" in config.project) {
-      // The service doesn't run in this folder, so it can't infer the T3 project from it.
-      const where = config.files.local ?? `a ${LOCAL_CONFIG_NAME} in the repository`;
-      problems.push(
-        `The background service can't infer the T3 project from ${config.project.folder}: set "project" in ${where}, then run \`linear-t3 start\` again`,
-      );
-    }
   } catch (error) {
-    problems.push(`${message(error)}\n  fix it, then run \`linear-t3 start\` again`);
+    problems.push(fixThenStart(error));
   }
 
   const credentials = new EnvFile(paths.credentials);
@@ -72,13 +88,18 @@ export async function preflight(
   };
   const t3Token = token("T3_TOKEN", "t3");
   const linearKey = token("LINEAR_API_KEY", "linear");
-  t3Url ??= await t3BaseUrl(paths.globalConfig);
+  const t3Url = config?.t3Url ?? (await t3BaseUrl(paths.globalConfig));
   const failures = await Promise.all([
     t3Token === undefined ? undefined : checkToken(() => checkT3Token(t3Url, t3Token), "t3"),
     linearKey === undefined ? undefined : checkToken(() => checkLinear(linearKey), "linear"),
   ]);
-  return {
-    problems: [...problems, ...failures.filter((failure) => failure !== undefined)],
-    localConfig: pinned,
-  };
+  problems.push(...failures.filter((failure) => failure !== undefined));
+  if (problems.length > 0 || !config || !t3Token) return { problems };
+
+  try {
+    const project = await resolveProject(config, t3Token);
+    return { problems, localConfig: config.files.local, project };
+  } catch (error) {
+    return { problems: [fixThenStart(error)] };
+  }
 }

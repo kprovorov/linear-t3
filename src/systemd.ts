@@ -16,12 +16,21 @@ const UNIT = `${NAME}.service`;
 const RESTART_DELAY = 10;
 const STOP_TIMEOUT = 30;
 
-/** `text` as one quoted word of a unit file, with `%` doubled so it isn't read as a specifier. */
-const quoteWord = (text: string) => `"${text.replace(/[\\"]/g, "\\$&").replace(/%/g, "%%")}"`;
+/**
+ * `text` as one quoted word of a unit file, with `%` doubled so it isn't read as a specifier and
+ * newlines as `\n`, which systemd unescapes, so a multi-line value stays on one line.
+ */
+const quoteWord = (text: string) =>
+  `"${text.replace(/[\\"]/g, "\\$&").replace(/%/g, "%%").replace(/\n/g, "\\n")}"`;
 /** `arg` as a word of `ExecStart`, which also expands `$`, so that's doubled too. */
 const quoteArg = (arg: string) => quoteWord(arg).replace(/\$/g, "$$$$");
-const unquote = (word: string) =>
-  word.replace(/\$\$/g, "$").replace(/%%/g, "%").replace(/\\(.)/g, "$1");
+/** The quoted words of a unit file line, unescaped; `exec` for `ExecStart`, which doubled `$`. */
+const unquoteWords = (line: string, exec: boolean) =>
+  [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(([, word]) =>
+    (exec ? word!.replace(/\$\$/g, "$") : word!)
+      .replace(/%%/g, "%")
+      .replace(/\\(.)/g, (_, char: string) => (char === "n" ? "\n" : char)),
+  );
 
 function unitFile(unit: Unit): string {
   const env = Object.entries(unit.env)
@@ -76,10 +85,17 @@ export function systemd(paths: Paths): ServiceManager {
     unitPath,
     logLocation: `journalctl --user -u ${NAME}`,
     installed: () => existsSync(unitPath),
-    pinnedNode() {
+    pinned() {
       if (!existsSync(unitPath)) return undefined;
-      const node = /^ExecStart="((?:[^"\\]|\\.)*)"/m.exec(readFileSync(unitPath, "utf8"));
-      return node ? unquote(node[1]!) : undefined;
+      const text = readFileSync(unitPath, "utf8");
+      const exec = /^ExecStart=(.*)$/m.exec(text)?.[1] ?? "";
+      const env = [...text.matchAll(/^Environment=(.*)$/gm)].flatMap(([, line]) =>
+        unquoteWords(line!, false).map((pair) => {
+          const at = pair.indexOf("=");
+          return [pair.slice(0, at), pair.slice(at + 1)] as const;
+        }),
+      );
+      return { program: unquoteWords(exec, true), env: Object.fromEntries(env) };
     },
 
     async install(unit) {

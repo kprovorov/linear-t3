@@ -1491,6 +1491,50 @@ interface ServiceSetup {
   cli: (...args: string[]) => ReturnType<typeof startCli>["result"];
   /** Every call the stand-in service manager got. */
   calls: () => string[];
+  /** What the installed unit runs: its arguments and environment, read back from the unit file. */
+  pinned: () => { args: string[]; env: Record<string, string> };
+  /** Fake T3's projects; the repository's is `project-1`, titled `my-app`. */
+  projects: FakeT3Options["projects"];
+  /** The Linear filters the fake Linear got. */
+  linearFilters: () => unknown[];
+  /** Says the service is running, so commands that act on a running service can be checked. */
+  markRunning: () => void;
+}
+
+/** Undoes a unit file's escaping of one quoted word; ExecStart words also doubled `$`. */
+const unquoteWord = (word: string, exec: boolean) =>
+  (exec ? word.replace(/\$\$/g, "$") : word)
+    .replace(/%%/g, "%")
+    .replace(/\\(.)/g, (_, char: string) => (char === "n" ? "\n" : char));
+const quotedWords = (line: string, exec: boolean) =>
+  [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => unquoteWord(match[1]!, exec));
+
+/** The arguments and environment of a systemd unit. */
+function systemdPinned(unit: string) {
+  const args = quotedWords(/^ExecStart=(.*)$/m.exec(unit)![1]!, true);
+  const env = Object.fromEntries(
+    [...unit.matchAll(/^Environment=(.*)$/gm)].map((match) => {
+      const [pair] = quotedWords(match[1]!, false);
+      return [pair!.slice(0, pair!.indexOf("=")), pair!.slice(pair!.indexOf("=") + 1)];
+    }),
+  );
+  return { args, env };
+}
+
+/** The arguments and environment of a launchd agent. */
+function launchdPinned(agent: string) {
+  const unescape = (text: string) =>
+    text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const strings = (xml: string) =>
+    [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((match) => unescape(match[1]!));
+  const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(agent)![1]!;
+  const dict = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(agent)![1]!;
+  const keys = [...dict.matchAll(/<key>([^<]*)<\/key>/g)].map((match) => match[1]!);
+  const values = strings(dict);
+  return {
+    args: strings(array),
+    env: Object.fromEntries(keys.map((key, i) => [key, values[i]!])),
+  };
 }
 
 /** Tests for what `start` checks first and for commands that need the service installed. */
@@ -1507,9 +1551,9 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
       fix: /Missing "team"[\s\S]*fix it, then run `linear-t3 start` again/,
     },
     {
-      case: "no project, which the service can't infer",
-      breaks: (f) => writeFile(f.local!, JSON.stringify({ team: "ENG" })),
-      fix: /can't infer the T3 project from [\s\S]*set "project" in [\s\S]*run `linear-t3 start` again/,
+      case: "a project T3 doesn't have",
+      breaks: (f) => writeFile(f.local!, JSON.stringify({ project: "nope", team: "ENG" })),
+      fix: /No T3 project matches "nope"[\s\S]*fix it, then run `linear-t3 start` again/,
     },
     {
       case: "an invalid Global Config",
@@ -1575,6 +1619,154 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
     expect(calls()).toEqual([]);
   });
 
+  test("start with no resolvable project exits non-zero and installs nothing", async () => {
+    const { env, files, calls } = await service();
+    // A repository no T3 project has, with no project set.
+    const other = repoDir({ project: undefined });
+    const result = await startCli({ cwd: other, env }, ["start"]).result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(
+      /No T3 project has the folder [\s\S]*fix it, then run `linear-t3 start` again/,
+    );
+    expect(existsSync(files.unit)).toBe(false);
+    expect(calls()).toEqual([]);
+  });
+
+  test("start in a repository pins the inferred project, the flags, the Local Config and the Global Config", async () => {
+    const { files, cli, pinned } = await service();
+    // No project, so it's inferred from the repository.
+    writeFile(files.local, JSON.stringify({ team: "OPS" }));
+    const result = await cli(
+      "start",
+      "--team",
+      "ENG",
+      "--filter",
+      '{"labels":{"some":{"name":{"eq":"agent"}}}}',
+      "--comment",
+      "false",
+    );
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).toContain('Pinned to T3 project "my-app" (project-1)');
+    expect(pinned().args).toEqual([
+      process.execPath,
+      cliPath,
+      "run",
+      "--project=project-1",
+      `--config=${files.local}`,
+      "--team=ENG",
+      '--filter={"labels":{"some":{"name":{"eq":"agent"}}}}',
+      "--comment=false",
+    ]);
+    expect(pinned().env.LINEAR_T3_CONFIG).toBe(files.config);
+  });
+
+  test("without a Local Config, start pins the project and flags alone", async () => {
+    const { files, cli, pinned } = await service();
+    rmSync(files.local);
+    const result = await cli("start", "--team", "ENG");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(pinned().args.slice(2)).toEqual([
+      "run",
+      "--project=project-1",
+      "--no-config",
+      "--team=ENG",
+    ]);
+  });
+
+  /** Runs the installed unit's command once, from `cwd`, as the service manager would. */
+  function runPinned(setup: ServiceSetup, cwd: string) {
+    const { args, env } = setup.pinned();
+    const base = {
+      HOME: setup.env.HOME!,
+      PATH: setup.env.PATH!,
+      LINEAR_API_URL: setup.env.LINEAR_API_URL!,
+    };
+    return startCli({ cwd, env: { ...base, ...env }, cli: args[1] }, [...args.slice(2), "--once"])
+      .result;
+  }
+
+  test("with no Local Config pinned, the Daemon ignores one where it runs", async () => {
+    const setup = await service();
+    rmSync(setup.files.local);
+    expect((await setup.cli("start", "--team", "OPS")).status).toBe(0);
+    const stray = repoDir({ filter: { priority: { eq: 1 } } });
+    const result = await runPinned(setup, stray);
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(setup.linearFilters()).toEqual([{ and: [{ team: { key: { eq: "OPS" } } }, {}] }]);
+  });
+
+  test("a multi-line flag is pinned as written", async () => {
+    const { cli, pinned } = await service();
+    const prompt = "Work on {identifier}\n\n{description}";
+    expect((await cli("start", "--prompt", prompt)).status).toBe(0);
+    expect(pinned().args.at(-1)).toBe(`--prompt=${prompt}`);
+  });
+
+  test("the installed Daemon launches into the pinned project from any working directory", async () => {
+    const setup = await service();
+    const { cli, linearFilters } = setup;
+    expect((await cli("start", "--team", "OPS")).status).toBe(0);
+    // From elsewhere, with the unit's environment and no tokens.
+    const result = await runPinned(setup, tmpdir());
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).toContain("watching OPS -> my-app");
+    expect(linearFilters()).toEqual([{ and: [{ team: { key: { eq: "OPS" } } }, {}] }]);
+  });
+
+  test("start again with other flags replaces what's pinned", async () => {
+    const { cli, pinned } = await service();
+    expect((await cli("start", "--team", "OPS", "--poll-interval", "30")).status).toBe(0);
+    expect((await cli("start", "--set-status", "In Progress")).status).toBe(0);
+    expect(pinned().args.slice(3)).toEqual([
+      "--project=project-1",
+      expect.stringMatching(/^--config=/),
+      "--set-status=In Progress",
+    ]);
+  });
+
+  test("--project on start is resolved to the project's id", async () => {
+    const { files, cli, pinned, projects } = await service();
+    projects.push({ id: "project-2", title: "other", workspaceRoot: "/work/other" });
+    expect((await cli("start", "--project", "other")).status).toBe(0);
+    expect(pinned().args.slice(3, 5)).toEqual(["--project=project-2", `--config=${files.local}`]);
+  });
+
+  test("restart keeps what's pinned", async () => {
+    const { files, cli, markRunning } = await service();
+    expect((await cli("start", "--team", "OPS")).status).toBe(0);
+    const before = readFileSync(files.unit, "utf8");
+    markRunning();
+    expect(await cli("restart")).toMatchObject({ status: 0, stderr: "" });
+    expect(readFileSync(files.unit, "utf8")).toBe(before);
+  });
+
+  test("status shows the pinned project and Config files, even from elsewhere", async () => {
+    const { env, files, cli } = await service();
+    expect((await cli("start")).status).toBe(0);
+    const result = await startCli({ cwd: tmpdir(), env }, ["status"]).result;
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Project:       project-1\n");
+    expect(result.stdout).toContain(`Global Config: ${files.config}\n`);
+    expect(result.stdout).toContain(`Local Config:  ${files.local}\n`);
+  });
+
+  test("status says when no Local Config is pinned", async () => {
+    const { files, cli } = await service();
+    rmSync(files.local);
+    expect((await cli("start", "--team", "ENG")).status).toBe(0);
+    expect((await cli("status")).stdout).toContain("Local Config:  none\n");
+  });
+
+  test("the unit never holds the tokens, from the environment or the Credentials", async () => {
+    const { env, dir, files } = await service();
+    const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
+    const { status } = await startCli({ cwd: dir, env: { ...env, ...tokens } }, ["start"]).result;
+    expect(status).toBe(0);
+    const unit = readFileSync(files.unit, "utf8");
+    expect(unit).not.toContain("lin-key");
+    expect(unit).not.toContain("t3-tok");
+  });
+
   test.each(["stop", "restart", "logs", "uninstall"])(
     "%s when the service isn't installed says so and exits non-zero",
     async (command) => {
@@ -1604,10 +1796,11 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
    */
   async function service() {
     const linear = await fakeLinear([], { apiKey: "lin-key" });
-    const t3 = await fakeT3({ projects: [], token: "t3-tok" });
+    const dir = repoDir();
+    const projects = [{ id: "project-1", title: "my-app", workspaceRoot: dir }];
+    const t3 = await fakeT3({ projects, token: "t3-tok" });
     cleanup.push(linear.close, t3.close);
     const home = homeDir();
-    const dir = repoDir();
     const files = {
       ...locations(home),
       log: join(home.XDG_STATE_HOME, "linear-t3", "daemon.log"),
@@ -1641,6 +1834,10 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
       files,
       cli: (...args: string[]) => startCli({ cwd: dir, env }, args).result,
       calls: recorded,
+      pinned: () => launchdPinned(readFileSync(files.unit, "utf8")),
+      projects,
+      linearFilters: () => linear.filters,
+      markRunning: () => writeFileSync(printed, runningPrint()),
       print: (output: string) => writeFileSync(printed, output),
       resetCalls: () => writeFileSync(calls, ""),
     };
@@ -1659,6 +1856,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
   /** What `launchctl print` shows for the agent, around `details`. */
   const printed = (details: string) =>
     `${target} = {\n\tactive count = 1\n\tpath = /x/linear-t3.plist\n\t${details}\n}\n`;
+  const runningPrint = () => printed(`state = running\n\tpid = ${process.pid}`);
 
   /** The agent `start` should write for `files`, with `env` as its environment. */
   function expectedAgent(files: { local: string; log: string }, env: Record<string, string>) {
@@ -1676,8 +1874,8 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
 \t\t<string>${process.execPath}</string>
 \t\t<string>${cliPath}</string>
 \t\t<string>run</string>
-\t\t<string>--config</string>
-\t\t<string>${files.local}</string>
+\t\t<string>--project=project-1</string>
+\t\t<string>--config=${files.local}</string>
 \t</array>
 \t<key>EnvironmentVariables</key>
 \t<dict>
@@ -1710,6 +1908,7 @@ ${variables}\t</dict>
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(readFileSync(files.unit, "utf8")).toBe(
       expectedAgent(files, {
+        LINEAR_T3_CONFIG: files.config,
         XDG_CONFIG_HOME: env.XDG_CONFIG_HOME,
         XDG_STATE_HOME: env.XDG_STATE_HOME,
       }),
@@ -1739,7 +1938,7 @@ ${variables}\t</dict>
     ]);
   });
 
-  test("the agent gets T3CODE_HOME and LINEAR_T3_CONFIG when set, and never the tokens", async () => {
+  test("the agent gets T3CODE_HOME when set", async () => {
     const { env, dir, files } = await service();
     const t3Home = mkdtempSync(join(tmpdir(), "linear-t3-t3home-"));
     const { status } = await startCli(
@@ -1809,13 +2008,15 @@ ${variables}\t</dict>
     }
   });
 
-  /** The lines `status` prints for where everything lives. */
-  const whereLines = (files: Record<string, string>) => [
-    `Config:      ${files.config}`,
-    `Credentials: ${files.credentials}`,
-    `State:       ${files.state}`,
-    `Log:         ${files.log}`,
-    `Unit:        ${files.unit}`,
+  /** The lines `status` prints for where everything lives; the pinned ones once installed. */
+  const whereLines = (files: Record<string, string>, installed = true) => [
+    ...(installed ? ["Project:       project-1"] : []),
+    `Global Config: ${files.config}`,
+    ...(installed ? [`Local Config:  ${files.local}`] : []),
+    `Credentials:   ${files.credentials}`,
+    `State:         ${files.state}`,
+    `Log:           ${files.log}`,
+    `Unit:          ${files.unit}`,
   ];
 
   test("status shows a running Daemon's pid and uptime, and where everything lives", async () => {
@@ -1824,7 +2025,7 @@ ${variables}\t</dict>
     expect(result).toMatchObject({ status: 0, stderr: "" });
     const lines = result.stdout.trimEnd().split("\n");
     expect(lines[0]).toMatch(
-      new RegExp(`^Daemon:      running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
+      new RegExp(`^Daemon:        running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
     );
     expect(lines.slice(1)).toEqual(whereLines(files));
   });
@@ -1836,7 +2037,7 @@ ${variables}\t</dict>
       const result = await cli("status");
       expect(result).toMatchObject({ status: 0, stderr: "" });
       expect(result.stdout.trimEnd().split("\n")).toEqual([
-        "Daemon:      stopped",
+        "Daemon:        stopped",
         ...whereLines(files),
       ]);
     },
@@ -1847,8 +2048,8 @@ ${variables}\t</dict>
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(result.stdout.trimEnd().split("\n")).toEqual([
-      "Daemon:      not installed, run `linear-t3 start`",
-      ...whereLines(files),
+      "Daemon:        not installed, run `linear-t3 start`",
+      ...whereLines(files, false),
     ]);
     expect(calls()).toEqual([]);
   });
@@ -1859,7 +2060,7 @@ ${variables}\t</dict>
     writeFile(files.config, JSON.stringify({ ...config, stateFile: "data/state.json" }));
     const result = await cli("status");
     expect(result.stdout).toContain(
-      `State:       ${join(dirname(files.config), "data", "state.json")}\n`,
+      `State:         ${join(dirname(files.config), "data", "state.json")}\n`,
     );
   });
 
@@ -1926,10 +2127,11 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
    */
   async function service() {
     const linear = await fakeLinear([], { apiKey: "lin-key" });
-    const t3 = await fakeT3({ projects: [], token: "t3-tok" });
+    const dir = repoDir();
+    const projects = [{ id: "project-1", title: "my-app", workspaceRoot: dir }];
+    const t3 = await fakeT3({ projects, token: "t3-tok" });
     cleanup.push(linear.close, t3.close);
     const home = homeDir();
-    const dir = repoDir();
     const files = {
       ...locations(home),
       unit: join(home.XDG_CONFIG_HOME, "systemd", "user", "linear-t3.service"),
@@ -1969,6 +2171,11 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
       files,
       cli: (...args: string[]) => startCli({ cwd: dir, env }, args).result,
       calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []),
+      pinned: () => systemdPinned(readFileSync(files.unit, "utf8")),
+      projects,
+      linearFilters: () => linear.filters,
+      markRunning: () =>
+        writeFileSync(shown, `MainPID=${process.pid}\nActiveState=active\nSubState=running\n`),
       show: (output: string) => writeFileSync(shown, output),
       enableLinger: () => writeFileSync(linger, ""),
       resetCalls: () => writeFileSync(calls, ""),
@@ -1984,7 +2191,7 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
 Description=linear-t3 Daemon
 
 [Service]
-ExecStart="${process.execPath}" "${cliPath}" "run" "--config" "${files.local}"
+ExecStart="${process.execPath}" "${cliPath}" "run" "--project=project-1" "--config=${files.local}"
 ${variables}Restart=on-failure
 RestartSec=10
 TimeoutStopSec=30
@@ -2003,6 +2210,7 @@ WantedBy=default.target
     expect(result.stdout).toContain(`Started the Daemon (systemd user unit ${files.unit})`);
     expect(readFileSync(files.unit, "utf8")).toBe(
       expectedUnit(files, {
+        LINEAR_T3_CONFIG: files.config,
         XDG_CONFIG_HOME: env.XDG_CONFIG_HOME,
         XDG_STATE_HOME: env.XDG_STATE_HOME,
       }),
@@ -2033,7 +2241,7 @@ WantedBy=default.target
     resetCalls();
     const result = await cli("start");
     expect(result).toMatchObject({ status: 0, stderr: "" });
-    expect(readFileSync(files.unit, "utf8")).toContain('"run" "--config"');
+    expect(readFileSync(files.unit, "utf8")).toContain('"run" "--project=project-1"');
     expect(calls()).toEqual([
       "systemctl --user daemon-reload",
       "systemctl --user enable linear-t3.service",
@@ -2041,7 +2249,7 @@ WantedBy=default.target
     ]);
   });
 
-  test("the unit gets T3CODE_HOME and LINEAR_T3_CONFIG when set, and never the tokens", async () => {
+  test("the unit gets T3CODE_HOME when set, and never the tokens", async () => {
     const { env, dir, files } = await service();
     const t3Home = mkdtempSync(join(tmpdir(), "linear-t3-t3home-"));
     const tokens = { LINEAR_API_KEY: "lin-key", T3_TOKEN: "t3-tok" };
@@ -2078,7 +2286,7 @@ WantedBy=default.target
     );
   });
 
-  test("without XDG variables the unit goes in ~/.config and gets no environment", async () => {
+  test("without XDG variables the unit goes in ~/.config and gets only the Global Config", async () => {
     const { env, dir, files } = await service();
     const home = { HOME: env.HOME, LINEAR_API_URL: env.LINEAR_API_URL, PATH: env.PATH };
     const config = join(env.HOME, ".config", "linear-t3", "config.json");
@@ -2091,7 +2299,7 @@ WantedBy=default.target
     expect(status).toBe(0);
     expect(
       readFileSync(join(env.HOME, ".config", "systemd", "user", "linear-t3.service"), "utf8"),
-    ).toBe(expectedUnit(files, {}));
+    ).toBe(expectedUnit(files, { LINEAR_T3_CONFIG: config }));
   });
 
   test("the unit escapes paths so systemd reads them back as written", async () => {
@@ -2104,7 +2312,7 @@ WantedBy=default.target
     const { status } = await startCli({ cwd: tmpdir(), env }, ["start", "--config", config]).result;
     expect(status).toBe(0);
     expect(readFileSync(files.unit, "utf8")).toContain(
-      `"--config" "${dir}/my \\"100%%\\" $$HOME\\\\x/c.json"\n`,
+      `"--config=${dir}/my \\"100%%\\" $$HOME\\\\x/c.json"\n`,
     );
   });
 
@@ -2156,13 +2364,15 @@ WantedBy=default.target
   const lingerHint =
     "The Daemon only runs while you're logged in. To keep it running after you log out, run `loginctl enable-linger`";
 
-  /** The lines `status` prints for where everything lives. */
-  const whereLines = (files: Record<string, string>) => [
-    `Config:      ${files.config}`,
-    `Credentials: ${files.credentials}`,
-    `State:       ${files.state}`,
-    "Log:         journalctl --user -u linear-t3",
-    `Unit:        ${files.unit}`,
+  /** The lines `status` prints for where everything lives; the pinned ones once installed. */
+  const whereLines = (files: Record<string, string>, installed = true) => [
+    ...(installed ? ["Project:       project-1"] : []),
+    `Global Config: ${files.config}`,
+    ...(installed ? [`Local Config:  ${files.local}`] : []),
+    `Credentials:   ${files.credentials}`,
+    `State:         ${files.state}`,
+    "Log:           journalctl --user -u linear-t3",
+    `Unit:          ${files.unit}`,
   ];
 
   test("status shows a running Daemon's pid and uptime, where everything lives, and the linger hint", async () => {
@@ -2171,7 +2381,7 @@ WantedBy=default.target
     expect(result).toMatchObject({ status: 0, stderr: "" });
     const lines = result.stdout.trimEnd().split("\n");
     expect(lines[0]).toMatch(
-      new RegExp(`^Daemon:      running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
+      new RegExp(`^Daemon:        running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
     );
     expect(lines.slice(1)).toEqual([...whereLines(files), "", lingerHint]);
     expect(calls()).toEqual([
@@ -2185,7 +2395,7 @@ WantedBy=default.target
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(result.stdout.trimEnd().split("\n")).toEqual([
-      "Daemon:      stopped",
+      "Daemon:        stopped",
       ...whereLines(files),
       "",
       lingerHint,
@@ -2207,10 +2417,24 @@ WantedBy=default.target
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(result.stdout.trimEnd().split("\n")).toEqual([
-      "Daemon:      not installed, run `linear-t3 start`",
-      ...whereLines(files),
+      "Daemon:        not installed, run `linear-t3 start`",
+      ...whereLines(files, false),
     ]);
     expect(calls()).toEqual([]);
+  });
+
+  test("status reads the Local Config of a unit from before projects were pinned", async () => {
+    const { files, cli } = await installed("stopped");
+    writeFileSync(
+      files.unit,
+      readFileSync(files.unit, "utf8").replace(
+        `"--project=project-1" "--config=${files.local}"`,
+        `"--config" "${files.local}"`,
+      ),
+    );
+    const { stdout } = await cli("status");
+    expect(stdout).toContain("Project:       not pinned, run `linear-t3 start` again\n");
+    expect(stdout).toContain(`Local Config:  ${files.local}\n`);
   });
 
   test("status warns when the node binary the unit runs no longer exists", async () => {

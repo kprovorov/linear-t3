@@ -103,11 +103,20 @@ export function launchd(paths: Paths): ServiceManager {
     unitPath: paths.launchAgent,
     logLocation: paths.log,
     installed: () => existsSync(paths.launchAgent),
-    pinnedNode() {
+    pinned() {
       if (!existsSync(paths.launchAgent)) return undefined;
       const agent = readFileSync(paths.launchAgent, "utf8");
-      const node = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(agent);
-      return node ? unescapeXml(node[1]!) : undefined;
+      const strings = (xml = "") =>
+        [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((match) => unescapeXml(match[1]!));
+      const program = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(agent);
+      const env = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(agent)?.[1];
+      const pairs = (env ?? "").matchAll(/<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g);
+      return {
+        program: strings(program?.[1]),
+        env: Object.fromEntries(
+          [...pairs].map(([, key, value]) => [unescapeXml(key!), unescapeXml(value!)]),
+        ),
+      };
     },
 
     async install(unit) {

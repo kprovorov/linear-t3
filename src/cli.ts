@@ -20,7 +20,7 @@ import { LOCAL_CONFIG_NAME, loadGlobalConfig } from "./config.ts";
 import { configFlags, configOptions } from "./flags.ts";
 import { resolvePaths } from "./paths.ts";
 import { preflight } from "./preflight.ts";
-import { ServiceError, daemonUnit, serviceManager } from "./service.ts";
+import { ServiceError, daemonUnit, pinnedTo, serviceManager } from "./service.ts";
 import { checkLinear } from "./token-check.ts";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -146,7 +146,7 @@ async function runDaemonCommand(
   options: {
     once?: boolean;
     dryRun?: boolean;
-    config?: string;
+    config?: string | false;
   } & Record<string, unknown>,
 ): Promise<void> {
   const { once = false, dryRun = false, config } = options;
@@ -178,7 +178,9 @@ async function exitOnServiceError(work: () => Promise<void>): Promise<void> {
 
 const cliPath = fileURLToPath(import.meta.url);
 
-async function start({ config }: { config?: string }): Promise<void> {
+async function start(
+  options: { config?: string | false } & Record<string, unknown>,
+): Promise<void> {
   const where = paths();
   const manager = serviceManager(where);
   // npm can clean the npx cache at any time, which would leave the service pointing at nothing.
@@ -187,14 +189,30 @@ async function start({ config }: { config?: string }): Promise<void> {
       "linear-t3 is running from the npx cache, which npm may clean up. Install it first with `npm i -g linear-t3`, then run `linear-t3 start`",
     );
   }
-  const { problems, localConfig } = await preflight(where, config);
-  if (problems.length > 0) {
+  const flags = configFlags(options);
+  const { problems, localConfig, project } = await preflight(where, {
+    localConfig: options.config,
+    flags,
+  });
+  if (problems.length > 0 || !project) {
     throw new ServiceError(
       ["The Daemon would not start, so it wasn't installed:", ...problems].join("\n"),
     );
   }
-  await manager.install(daemonUnit(cliPath, localConfig));
-  console.log(`Started the Daemon (${manager.kind} ${manager.unitPath})`);
+  await manager.install(
+    daemonUnit(cliPath, {
+      project: project.id,
+      localConfig,
+      globalConfig: where.globalConfig,
+      flags,
+    }),
+  );
+  console.log(
+    [
+      `Started the Daemon (${manager.kind} ${manager.unitPath})`,
+      `Pinned to T3 project "${project.title}" (${project.id})`,
+    ].join("\n"),
+  );
 }
 
 /** The service manager, once `start` has installed the Daemon. */
@@ -229,31 +247,45 @@ async function status(): Promise<void> {
   const manager = serviceManager(where);
   let daemon = "not installed, run `linear-t3 start`";
   let hint: string | undefined;
-  if (manager.installed()) {
+  let pinned: ReturnType<typeof pinnedTo> | undefined;
+  const unit = manager.installed() ? manager.pinned() : undefined;
+  if (unit) {
     const service = await manager.status();
     const { running, pid, uptime } = service;
     hint = service.hint;
     daemon = running ? `running (pid ${pid}${uptime ? `, up ${uptime}` : ""})` : "stopped";
-    const node = manager.pinnedNode();
+    const node = unit.program[0];
     if (node && !existsSync(node)) {
       console.error(
         `The Daemon runs ${node}, which no longer exists; run \`linear-t3 start\` again to use this node`,
       );
     }
+    pinned = pinnedTo(unit);
   }
+  const globalConfig = pinned?.globalConfig ?? where.globalConfig;
   // An unreadable Config can't say where State is, so show where it would be by default.
-  const state = await loadGlobalConfig(where.globalConfig).then(
+  const state = await loadGlobalConfig(globalConfig).then(
     (config) => config.stateFile ?? where.defaultState,
     () => where.defaultState,
   );
+  // The pinned rows only exist once installed. Units from before projects were pinned have none.
+  const project = pinned && (pinned.project ?? "not pinned, run `linear-t3 start` again");
+  const localConfig = pinned && (pinned.localConfig ?? "none");
+  const lines: [string, string | undefined][] = [
+    ["Daemon", daemon],
+    ["Project", project],
+    ["Global Config", globalConfig],
+    ["Local Config", localConfig],
+    ["Credentials", where.credentials],
+    ["State", state],
+    ["Log", manager.logLocation],
+    ["Unit", manager.unitPath],
+  ];
   console.log(
     [
-      `Daemon:      ${daemon}`,
-      `Config:      ${where.globalConfig}`,
-      `Credentials: ${where.credentials}`,
-      `State:       ${state}`,
-      `Log:         ${manager.logLocation}`,
-      `Unit:        ${manager.unitPath}`,
+      ...lines.flatMap(([label, value]) =>
+        value === undefined ? [] : [`${`${label}:`.padEnd(15)}${value}`],
+      ),
       ...(hint ? ["", hint] : []),
     ].join("\n"),
   );
@@ -268,6 +300,10 @@ const program = new Command("linear-t3").version(pkg.version).action(() => progr
 const CONFIG_OPTION = [
   "--config <path>",
   `the Local Config to use instead of the nearest ${LOCAL_CONFIG_NAME} up to the Git root. The Global Config is $LINEAR_T3_CONFIG or $XDG_CONFIG_HOME/linear-t3/config.json`,
+] as const;
+const NO_CONFIG_OPTION = [
+  "--no-config",
+  "use no Local Config, even if the repository has one",
 ] as const;
 
 program
@@ -298,14 +334,21 @@ const run = program
     "show which issues would start now and which would wait on a cap, without starting threads, then exit",
   )
   .option(...CONFIG_OPTION)
+  .option(...NO_CONFIG_OPTION)
   .action(runDaemonCommand);
 for (const option of configOptions()) run.addOption(option);
 
-program
+const startCommand = program
   .command("start")
-  .description("install and start the Daemon as a background service; safe to run again")
+  .description(
+    "install and start the Daemon as a background service, pinned to the T3 project, these flags and the Config files; run it again to change them",
+  )
   .option(...CONFIG_OPTION)
-  .action((options: { config?: string }) => exitOnServiceError(() => start(options)));
+  .option(...NO_CONFIG_OPTION)
+  .action((options: { config?: string | false } & Record<string, unknown>) =>
+    exitOnServiceError(() => start(options)),
+  );
+for (const option of configOptions()) startCommand.addOption(option);
 
 program
   .command("stop")
@@ -314,7 +357,9 @@ program
 
 program
   .command("restart")
-  .description("restart the Daemon, e.g. to pick up Config changes")
+  .description(
+    "restart the Daemon with what `start` pinned, e.g. to pick up Config file changes; the project and flags stay pinned until `start` again",
+  )
   .action(() => exitOnServiceError(restart));
 
 program
