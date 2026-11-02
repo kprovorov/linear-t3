@@ -208,25 +208,25 @@ describe("cli", () => {
     expect(result.status).toBe(0);
     const help = result.stdout.replace(/\s+/g, " ");
     const flags: [string, string, string][] = [
-      ["--project <project>", "the T3 project whose folder is the Git root", "local"],
+      ["--project <project>", "default: the T3 project whose folder is the Git root", "local"],
       ["--team <team>", "required", "local"],
-      ["--filter <json>", "none", "local"],
-      ["--set-status <status>", "leave the status as it is", "local"],
-      ["--comment [true|false]", "true", "all"],
-      ["--model <model>", "the T3 project's default model", "all"],
-      ["--provider <provider>", "the Provider of the T3 project's default model", "all"],
-      ["--runtime-mode <mode>", "full-access", "all"],
-      ["--workspace <local|worktree>", "worktree", "all"],
-      ["--base-ref <ref>", "the repository's default branch, as T3 reports it", "all"],
-      ["--start-from-origin [true|false]", "true", "all"],
-      ["--prompt <template>", "a built-in template", "all"],
-      ["--poll-interval <seconds>", "60", "all"],
+      ["--filter <json>", "default: none", "local"],
+      ["--set-status <status>", "default: leave the status as it is", "local"],
+      ["--comment [true|false]", "default: true", "all"],
+      ["--model <model>", "default: the T3 project's default model", "all"],
+      ["--provider <provider>", "default: the Provider of the T3 project's default model", "all"],
+      ["--runtime-mode <mode>", "default: full-access", "all"],
+      ["--workspace <local|worktree>", "default: worktree", "all"],
+      ["--base-ref <ref>", "default: the repository's default branch, as T3 reports it", "all"],
+      ["--start-from-origin [true|false]", "default: true", "all"],
+      ["--prompt <template>", "default: a built-in template", "all"],
+      ["--poll-interval <seconds>", "default: 60", "all"],
     ];
     for (const [flag, fallback, scope] of flags) {
       expect(help).toContain(flag);
       const after = help.slice(help.indexOf(flag));
       expect(after.slice(0, after.indexOf(")") + 1)).toMatch(
-        new RegExp(`\\(default: ${fallback.replace(/[|()]/g, "\\$&")}; scope: ${scope}\\)$`),
+        new RegExp(`\\(${fallback.replace(/[|()]/g, "\\$&")}; scope: ${scope}\\)$`),
       );
     }
     for (const flag of ["--max-running-threads", "--t3-url", "--state-file"]) {
@@ -759,8 +759,6 @@ describe("cli run against fake Linear and T3", () => {
       "release",
       "--start-from-origin",
       "false",
-      "--poll-interval",
-      "30",
     ]).result;
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(t3.launches[0]).toMatchObject({
@@ -781,27 +779,25 @@ describe("cli run against fake Linear and T3", () => {
     expect(t3.launches.map((launch) => launch.projectId)).toEqual(["sub", "sub"]);
   });
 
-  test.each<{ args: string[]; comments: number }>([
-    { args: ["--comment", "false"], comments: 0 },
-    { args: ["--comment"], comments: 1 },
-    { args: ["--comment", "true"], comments: 1 },
+  test.each<{ args: string[]; config: "Global" | "Local"; comment: boolean; comments: number }>([
+    { args: ["--comment", "false"], config: "Local", comment: true, comments: 0 },
+    { args: ["--comment", "false"], config: "Global", comment: true, comments: 0 },
+    { args: ["--comment"], config: "Global", comment: false, comments: 1 },
+    { args: ["--comment", "true"], config: "Global", comment: false, comments: 1 },
   ])(
-    "$args over comment: false in the Global Config leaves $comments comment(s)",
-    async ({ args, comments }) => {
-      const { linear, dir, env } = await servers({}, { comment: false }, [issues[0]!]);
+    "$args over comment: $comment in the $config Config leaves $comments comment(s)",
+    async ({ args, config, comment, comments }) => {
+      const { linear, dir, env } = await servers(
+        {},
+        config === "Global" ? { comment } : {},
+        [issues[0]!],
+        config === "Local" ? { comment } : {},
+      );
       const result = await startCli({ cwd: dir, env }, ["run", "--once", ...args]).result;
       expect(result).toMatchObject({ status: 0, stderr: "" });
       expect(linear.comments).toHaveLength(comments);
     },
   );
-
-  test("--comment false overrides comment: true from the Local Config", async () => {
-    const { linear, dir, env } = await servers({}, {}, [issues[0]!], { comment: true });
-    const result = await startCli({ cwd: dir, env }, ["run", "--once", "--comment", "false"])
-      .result;
-    expect(result).toMatchObject({ status: 0, stderr: "" });
-    expect(linear.comments).toEqual([]);
-  });
 
   test("each key takes the Local value, else the Global one, else the built-in default", async () => {
     const { t3, dir, env } = await servers(

@@ -7,7 +7,7 @@ const keys = Object.keys(KEYS) as Key[];
 const flagKeys = keys.filter((key) => KEYS[key].scope !== "global");
 
 /** Turns what was typed after a flag into the key's value, or says what's wrong with it. */
-function parse(declaration: KeyDeclaration, text: string, previous: unknown): unknown {
+function parse(declaration: KeyDeclaration, text: string): unknown {
   let value: unknown = text;
   switch (declaration.type) {
     case "boolean":
@@ -25,10 +25,6 @@ function parse(declaration: KeyDeclaration, text: string, previous: unknown): un
         throw new InvalidArgumentError(`Invalid JSON: ${(error as Error).message}`);
       }
       break;
-    case "list":
-      // Repeated flags add up; together they replace the files' list.
-      value = [...((previous as unknown[] | undefined) ?? []), text];
-      break;
   }
   const result = declaration.schema.safeParse(value);
   if (!result.success) {
@@ -37,10 +33,10 @@ function parse(declaration: KeyDeclaration, text: string, previous: unknown): un
   return result.data;
 }
 
-/** What help says a key defaults to. */
-function helpDefault(declaration: KeyDeclaration): string {
-  if (declaration.unset !== undefined) return declaration.unset;
-  return String(declaration.fallback);
+/** What help says a key defaults to, e.g. `default: 60`, or that it's `required`. */
+function helpDefault({ defaultText, fallback }: KeyDeclaration): string {
+  if (defaultText === "required") return defaultText;
+  return `default: ${defaultText ?? String(fallback)}`;
 }
 
 /** One option per non-global key, for `run`: `--start-from-origin [true|false]` and so on. */
@@ -48,10 +44,10 @@ export function configOptions(): Option[] {
   return flagKeys.map((key) => {
     const declaration: KeyDeclaration = KEYS[key];
     const arg = declaration.type === "boolean" ? "[true|false]" : (declaration.arg ?? "<value>");
-    const help = `${declaration.description} (default: ${helpDefault(declaration)}; scope: ${declaration.scope})`;
+    const help = `${declaration.description} (${helpDefault(declaration)}; scope: ${declaration.scope})`;
     // A bare boolean flag means `true`, which is what commander gives an optional value left out.
-    return new Option(`--${flagName(key)} ${arg}`, help).argParser((text, previous) =>
-      parse(declaration, text, previous),
+    return new Option(`--${flagName(key)} ${arg}`, help).argParser((text) =>
+      parse(declaration, text),
     );
   });
 }

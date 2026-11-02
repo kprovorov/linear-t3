@@ -20,11 +20,8 @@ export const DEFAULT_PROMPT = `Work on Linear issue {identifier}: {title}
  */
 export type Scope = "global" | "local" | "all";
 
-/**
- * How a key's value is written, so that a flag can be generated from it. A `list` flag repeats,
- * and its values replace the files' list.
- */
-export type KeyType = "string" | "boolean" | "integer" | "json" | "list";
+/** How a key's value is written, so that a flag can be generated from it. */
+export type KeyType = "string" | "boolean" | "integer" | "json";
 
 export interface KeyDeclaration<S extends z.ZodType = z.ZodType> {
   type: KeyType;
@@ -33,10 +30,10 @@ export interface KeyDeclaration<S extends z.ZodType = z.ZodType> {
   /** The built-in default, used when no layer sets the key. */
   fallback?: z.output<S>;
   description: string;
-  /** The flag's value placeholder in help, e.g. `<team>`. Booleans get `[true|false]`. */
+  /** The flag's value placeholder in help, e.g. `<team>`. Booleans always get `[true|false]`. */
   arg?: string;
   /** What help says the default is, when `fallback` is unset or doesn't read well. */
-  unset?: string;
+  defaultText?: string;
 }
 
 const declare = <S extends z.ZodType>(declaration: KeyDeclaration<S>) => declaration;
@@ -53,7 +50,7 @@ export const KEYS = {
     description:
       "the T3 project to launch threads in: its id, unique title or folder path, relative to the file that sets it or, on the CLI, to the working directory",
     arg: "<project>",
-    unset: "the T3 project whose folder is the Git root",
+    defaultText: "the T3 project whose folder is the Git root",
   }),
   team: declare({
     type: "string",
@@ -61,7 +58,7 @@ export const KEYS = {
     schema: z.string().min(1),
     description: 'the Linear team key whose issues to watch, e.g. "ENG"',
     arg: "<team>",
-    unset: "required",
+    defaultText: "required",
   }),
   filter: declare({
     type: "json",
@@ -71,7 +68,7 @@ export const KEYS = {
     schema: z.record(z.string(), z.unknown()),
     description: "a Linear IssueFilter, as JSON, that issues must also match",
     arg: "<json>",
-    unset: "none",
+    defaultText: "none",
   }),
   setStatus: declare({
     type: "string",
@@ -79,7 +76,7 @@ export const KEYS = {
     schema: z.string().min(1),
     description: "the workflow status to move an issue to once its thread starts",
     arg: "<status>",
-    unset: "leave the status as it is",
+    defaultText: "leave the status as it is",
   }),
   comment: declare({
     type: "boolean",
@@ -94,7 +91,7 @@ export const KEYS = {
     schema: z.string().min(1),
     description: "the exact model id threads run on",
     arg: "<model>",
-    unset: "the T3 project's default model",
+    defaultText: "the T3 project's default model",
   }),
   provider: declare({
     type: "string",
@@ -102,7 +99,7 @@ export const KEYS = {
     schema: z.string().min(1),
     description: "the T3 Provider instance id for `model`",
     arg: "<provider>",
-    unset: "the Provider of the T3 project's default model",
+    defaultText: "the Provider of the T3 project's default model",
   }),
   runtimeMode: declare({
     type: "string",
@@ -128,7 +125,7 @@ export const KEYS = {
     schema: z.string().min(1),
     description: "the ref new worktrees branch from",
     arg: "<ref>",
-    unset: "the repository's default branch, as T3 reports it",
+    defaultText: "the repository's default branch, as T3 reports it",
   }),
   startFromOrigin: declare({
     type: "boolean",
@@ -145,7 +142,7 @@ export const KEYS = {
     description:
       "the first message of each thread; {identifier}, {title}, {url}, {description} and {branchName} are filled in",
     arg: "<template>",
-    unset: "a built-in template",
+    defaultText: "a built-in template",
   }),
   pollInterval: declare({
     type: "integer",
