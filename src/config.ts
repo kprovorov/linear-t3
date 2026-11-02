@@ -132,19 +132,19 @@ export const KEYS = {
     type: "string",
     scope: "all",
     schema: z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]),
-    fallback: "full-access",
     description:
       "the T3 runtime mode threads start in: approval-required, auto-accept-edits, auto or full-access",
     arg: "<mode>",
+    defaultText: "the T3 project's default runtime mode, else T3's",
   }),
   workspace: declare({
     type: "string",
     scope: "all",
     schema: z.enum(["local", "worktree"]),
-    fallback: "worktree",
     description:
       "`worktree`: a new Git worktree per issue, on its Linear branch; `local`: the project's own checkout",
     arg: "<local|worktree>",
+    defaultText: "where the T3 project starts new threads, else where T3 does",
   }),
   baseRef: declare({
     type: "string",
@@ -158,8 +158,8 @@ export const KEYS = {
     type: "boolean",
     scope: "all",
     schema: z.boolean(),
-    fallback: true,
     description: "branch new worktrees from the remote's `baseRef`",
+    defaultText: "the T3 project's \"new worktrees start from origin\", else T3's",
   }),
   prompt: declare({
     type: "string",
@@ -231,11 +231,12 @@ export interface Config {
   comment: boolean;
   model?: string;
   provider?: string;
-  runtimeMode: Value<"runtimeMode">;
-  workspace: Value<"workspace">;
+  /** This and `workspace` and `startFromOrigin`, unset: T3's settings, which the Daemon asks for. */
+  runtimeMode?: Value<"runtimeMode">;
+  workspace?: Value<"workspace">;
   /** Unset: the repository's default branch, which the Daemon asks T3 for. */
   baseRef?: string;
-  startFromOrigin: boolean;
+  startFromOrigin?: boolean;
   prompt: string;
   pollInterval: number;
   maxRunningThreads?: number;
@@ -243,6 +244,8 @@ export interface Config {
   /** Absolute. */
   stateFile: string;
   files: { global: string; local?: string };
+  /** Where each key that has a value got it: its flag, a Config file's path, or `default`. */
+  sources: Partial<Record<Key, string>>;
 }
 
 const isKey = (key: string): key is Key => Object.hasOwn(KEYS, key);
@@ -398,7 +401,7 @@ export interface ConfigSources {
 
 /**
  * The effective Config: per key, the CLI flags, else the Local Config, else the Global Config,
- * else the built-in default. A value replaces the lower one whole; lists and objects never merge.
+ * else the built-in default. Keys T3's settings default are left unset for the Daemon to fill in. A value replaces the lower one whole; lists and objects never merge.
  */
 export async function loadConfig({
   global: globalPath,
@@ -425,11 +428,17 @@ export async function loadConfig({
 
   const cliLayer: Layer = { base: cwd, values: flags };
   const layers = [cliLayer, localLayer, globalLayer].filter((layer) => layer !== undefined);
+  const sources: Config["sources"] = {};
   const pick = <K extends Key>(key: K): { value?: Value<K>; layer?: Layer } => {
     for (const layer of layers) {
-      if (layer.values[key] !== undefined) return { value: layer.values[key], layer };
+      if (layer.values[key] !== undefined) {
+        sources[key] = layer.path ?? `--${flagName(key)}`;
+        return { value: layer.values[key], layer };
+      }
     }
-    return { value: (KEYS[key] as KeyDeclaration).fallback as Value<K> | undefined };
+    const fallback = (KEYS[key] as KeyDeclaration).fallback as Value<K> | undefined;
+    if (fallback !== undefined) sources[key] = "default";
+    return { value: fallback };
   };
   const get = <K extends Key>(key: K) => pick(key).value;
   const required = <K extends Key>(key: K): Value<K> => {
@@ -458,15 +467,16 @@ export async function loadConfig({
     comment: required("comment"),
     model: get("model"),
     provider: get("provider"),
-    runtimeMode: required("runtimeMode"),
-    workspace: required("workspace"),
+    runtimeMode: get("runtimeMode"),
+    workspace: get("workspace"),
     baseRef: get("baseRef"),
-    startFromOrigin: required("startFromOrigin"),
+    startFromOrigin: get("startFromOrigin"),
     prompt: required("prompt"),
     pollInterval: required("pollInterval"),
     maxRunningThreads: get("maxRunningThreads"),
     t3Url: required("t3Url"),
     stateFile: stateFile ? resolveStateFile(globalPath, stateFile) : defaultState,
     files: { global: globalPath, local: localLayer?.path },
+    sources,
   };
 }

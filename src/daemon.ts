@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { loadConfig, type Config, type Values } from "./config.ts";
+import { flagName, loadConfig, type Config, type Values } from "./config.ts";
 import { EnvFile } from "./env-file.ts";
 import {
   createCommentOnce,
@@ -19,6 +19,7 @@ import { findProject } from "./project.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import {
   T3Client,
+  T3RpcFailure,
   T3ThreadNotCreated,
   isRunningThread,
   threadIdFor,
@@ -26,6 +27,7 @@ import {
   type T3Project,
   type T3Model,
   type T3Provider,
+  type T3Settings,
   type WorkspaceStrategy,
 } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
@@ -60,8 +62,9 @@ async function readShell(t3: T3Client) {
 function workspaceFor(config: Config, issue: Issue): WorkspaceStrategy {
   if (config.workspace === "local") return { type: "root" };
   const { baseRef, startFromOrigin } = config;
-  // prepare fills it in before the first poll.
+  // prepare fills them in before the first poll.
   if (baseRef === undefined) throw new Error("baseRef is unresolved");
+  if (startFromOrigin === undefined) throw new Error("startFromOrigin is unresolved");
   return { type: "worktree", baseRef, startFromOrigin, branch: issue.branchName };
 }
 
@@ -130,11 +133,116 @@ function resolveModel(
   throw new Error(`No model matches "${model}" in ${where}`);
 }
 
+// The keys that default to T3's settings, with the setting each one reads.
+const T3_SETTINGS = {
+  runtimeMode: "defaultRuntimeMode",
+  workspace: "defaultThreadEnvMode",
+  startFromOrigin: "newWorktreesStartFromOrigin",
+} as const;
+
+type Found<V> = { value: V; source: string };
+
 /**
- * Before the first poll: the T3 project this run watches, `config` with `model` and `provider`
- * resolved through T3's model catalog and `baseRef` set, as configured or else the project's
- * default branch, and the issue filter, with its status and label names checked against the team.
- * Worktrees need `baseRef`; `workspace: local` creates none, so it isn't looked up.
+ * Where new threads start when T3 sets neither: the repository's t3.json, else `local`, as in T3.
+ * T3 reads the file, as the project's folder may be on another machine.
+ */
+async function projectFileEnvMode(
+  t3: T3Client,
+  project: T3Project,
+): Promise<Found<"local" | "worktree">> {
+  const builtIn = { value: "local", source: "T3's default" } as const;
+  let text: string | undefined;
+  try {
+    text = await t3.readProjectFile(project.workspaceRoot, "t3.json");
+  } catch (error) {
+    if (!(error instanceof T3RpcFailure)) throw error;
+    log(
+      `T3 couldn't read t3.json in "${project.title}", so using ${builtIn.source}: ${error.message}`,
+    );
+    return builtIn;
+  }
+  if (text === undefined) return builtIn;
+  let mode: unknown;
+  try {
+    mode = (JSON.parse(text) as { defaultThreadEnvMode?: unknown }).defaultThreadEnvMode;
+  } catch (error) {
+    log(
+      `t3.json in "${project.title}" isn't valid JSON, so using ${builtIn.source}: ${(error as Error).message}`,
+    );
+    return builtIn;
+  }
+  return mode === "local" || mode === "worktree"
+    ? { value: mode, source: join(project.workspaceRoot, "t3.json") }
+    : builtIn;
+}
+
+/**
+ * `config` with each key in T3_SETTINGS that no layer set taken from T3: the project's own
+ * setting, else T3's global one, else what T3 itself falls back to. `startFromOrigin` only matters
+ * for worktrees, so it stays unset for `workspace: local`.
+ */
+async function withT3Settings(
+  config: Config,
+  project: T3Project,
+  settings: T3Settings,
+  t3: T3Client,
+): Promise<Config> {
+  const override = settings.projectSettingsOverrides?.[project.id] ?? {};
+  const fromT3 = <K extends keyof typeof T3_SETTINGS>(key: K) => {
+    const setting = T3_SETTINGS[key];
+    if (override[setting] !== undefined) {
+      return { value: override[setting], source: `T3 project "${project.title}" setting` };
+    }
+    if (settings[setting] !== undefined) {
+      return { value: settings[setting], source: "T3's global setting" };
+    }
+    return undefined;
+  };
+  // T3 always reports these two, with its own default when the user set none.
+  const required = <V>(key: keyof typeof T3_SETTINGS, found: Found<V> | undefined): Found<V> => {
+    if (found !== undefined) return found;
+    throw new Error(
+      `T3 doesn't report its ${T3_SETTINGS[key]} setting, which linear-t3 needs for ${key}. Update T3 Code, or pass --${flagName(key)}`,
+    );
+  };
+
+  const resolved = { ...config, sources: { ...config.sources } };
+  const fill = <V>(key: keyof typeof T3_SETTINGS, found: Found<V>) => {
+    resolved.sources[key] = found.source;
+    return found.value;
+  };
+  if (config.runtimeMode === undefined) {
+    // T3 checks its own runtime modes.
+    const found = required("runtimeMode", fromT3("runtimeMode"));
+    resolved.runtimeMode = fill("runtimeMode", found) as Config["runtimeMode"];
+  }
+  if (config.workspace === undefined) {
+    resolved.workspace = fill(
+      "workspace",
+      fromT3("workspace") ?? (await projectFileEnvMode(t3, project)),
+    );
+  }
+  if (resolved.workspace === "worktree" && config.startFromOrigin === undefined) {
+    resolved.startFromOrigin = fill(
+      "startFromOrigin",
+      required("startFromOrigin", fromT3("startFromOrigin")),
+    );
+  }
+  return resolved;
+}
+
+/** Whether a key T3's settings default is still unset, so `server.getConfig` must be read. */
+const needsT3Settings = (config: Config) =>
+  config.runtimeMode === undefined ||
+  config.workspace === undefined ||
+  (config.workspace === "worktree" && config.startFromOrigin === undefined);
+
+/**
+ * Before the first poll: the T3 project this run watches, `config` with `runtimeMode`,
+ * `workspace` and `startFromOrigin` filled in from T3's settings where no layer set them, `model`
+ * and `provider` resolved through T3's model catalog and `baseRef` set, as configured or else the
+ * project's default branch, and the issue filter, with its status and label names checked against
+ * the team. Worktrees need `baseRef`; `workspace: local` creates none, so it isn't looked up.
  */
 async function prepare(
   loaded: Config,
@@ -148,11 +256,15 @@ async function prepare(
   shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
   try {
     const needsCatalog = loaded.model !== undefined || loaded.provider !== undefined;
-    const [shell, providers] = await Promise.all([
+    const [shell, serverConfig] = await Promise.all([
       t3.readShell(),
-      needsCatalog ? t3.providers() : undefined,
+      needsCatalog || needsT3Settings(loaded) ? t3.serverConfig() : undefined,
     ]);
     const project = findProject(shell.projects, loaded);
+    if (serverConfig !== undefined) {
+      loaded = await withT3Settings(loaded, project, serverConfig.settings, t3);
+    }
+    const providers = needsCatalog ? serverConfig?.providers : undefined;
     if (providers !== undefined) {
       const provider =
         loaded.provider === undefined ? undefined : resolveProvider(providers, loaded.provider);
@@ -259,6 +371,12 @@ function modelFor(config: Config, project: T3Project): ModelSelection {
   return { instanceId: config.provider, model: config.model };
 }
 
+function runtimeModeFor(config: Config): string {
+  // prepare fills it in before the first poll.
+  if (config.runtimeMode === undefined) throw new Error("runtimeMode is unresolved");
+  return config.runtimeMode;
+}
+
 async function launchIssue(
   issue: Issue,
   project: T3Project,
@@ -274,7 +392,7 @@ async function launchIssue(
       projectId: project.id,
       title: `${issue.identifier}: ${issue.title}`,
       modelSelection,
-      runtimeMode: config.runtimeMode,
+      runtimeMode: runtimeModeFor(config),
       workspaceStrategy: workspaceFor(config, issue),
       message: renderPrompt(config.prompt, issue),
     })
@@ -538,6 +656,16 @@ export async function runDaemon({
   // A dry run launches nothing, so it never writes State.
   await state.load({ checkWritable: !dryRun });
 
+  if (dryRun) {
+    for (const key of Object.keys(T3_SETTINGS) as (keyof typeof T3_SETTINGS)[]) {
+      const source = config.sources[key];
+      log(
+        source
+          ? `${key}: ${String(config[key])} (${source})`
+          : `${key}: unused with workspace local`,
+      );
+    }
+  }
   log(`watching ${config.team} -> ${project.title}`);
   while (!shutdown.signal.aborted) {
     try {

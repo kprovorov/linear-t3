@@ -223,10 +223,18 @@ describe("cli", () => {
         "default: the one enabled Provider that offers `model`, else the T3 project's default Provider",
         "all",
       ],
-      ["--runtime-mode <mode>", "default: full-access", "all"],
-      ["--workspace <local|worktree>", "default: worktree", "all"],
+      ["--runtime-mode <mode>", "default: the T3 project's default runtime mode, else T3's", "all"],
+      [
+        "--workspace <local|worktree>",
+        "default: where the T3 project starts new threads, else where T3 does",
+        "all",
+      ],
       ["--base-ref <ref>", "default: the repository's default branch, as T3 reports it", "all"],
-      ["--start-from-origin [true|false]", "default: true", "all"],
+      [
+        "--start-from-origin [true|false]",
+        "default: the T3 project's \"new worktrees start from origin\", else T3's",
+        "all",
+      ],
       ["--prompt <template>", "default: a built-in template", "all"],
       ["--poll-interval <seconds>", "default: 60", "all"],
     ];
@@ -645,7 +653,12 @@ describe("cli run against fake Linear and T3", () => {
     linearOptions: Parameters<typeof fakeLinear>[1] = {},
   ) {
     const linear = await fakeLinear(linearIssues, linearOptions);
-    const t3 = await fakeT3({ projects: [project], ...t3Options });
+    // T3 set to start threads in worktrees, unless a test says otherwise.
+    const t3 = await fakeT3({
+      projects: [project],
+      ...t3Options,
+      settings: { defaultThreadEnvMode: "worktree", ...t3Options.settings },
+    });
     cleanup.push(linear.close, t3.close);
     const home = homeDir();
     const files = locations(home);
@@ -927,7 +940,7 @@ describe("cli run against fake Linear and T3", () => {
     },
   );
 
-  test("each key takes the Local value, else the Global one, else the built-in default", async () => {
+  test("each key takes the Local value, else the Global one, else the default", async () => {
     const { t3, dir, env } = await servers(
       {},
       { prompt: "Global {identifier}", runtimeMode: "approval-required", baseRef: "develop" },
@@ -950,7 +963,7 @@ describe("cli run against fake Linear and T3", () => {
     });
   });
 
-  test("built-in defaults apply when neither Config sets a key", async () => {
+  test("T3's and built-in defaults apply when neither Config sets a key", async () => {
     const { t3, dir, env } = await servers({}, {}, [issues[0]!]);
     const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
     expect(result).toMatchObject({ status: 0, stderr: "" });
@@ -969,6 +982,185 @@ describe("cli run against fake Linear and T3", () => {
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(t3.launches[0]!.workspaceStrategy).toEqual({ type: "root" });
     expect(t3.rpcs.map((rpc) => rpc.tag)).not.toContain("vcs.listRefs");
+  });
+
+  describe("runtimeMode, workspace and startFromOrigin default to T3's settings", () => {
+    // T3's global settings, all different from T3's own defaults.
+    const global = {
+      defaultRuntimeMode: "approval-required",
+      defaultThreadEnvMode: "worktree" as const,
+      newWorktreesStartFromOrigin: false,
+    };
+
+    test("the T3 project's own settings win over T3's global ones", async () => {
+      const { t3, dir, env } = await servers(
+        {
+          settings: {
+            ...global,
+            projectSettingsOverrides: {
+              "project-1": { defaultRuntimeMode: "auto", defaultThreadEnvMode: "local" },
+              other: { defaultRuntimeMode: "auto-accept-edits" },
+            },
+          },
+        },
+        {},
+        [issues[0]!],
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches[0]).toMatchObject({
+        runtimeMode: "auto",
+        workspaceStrategy: { type: "root" },
+      });
+    });
+
+    test("with no project override, T3's global settings apply", async () => {
+      const { t3, dir, env } = await servers(
+        {
+          settings: {
+            ...global,
+            projectSettingsOverrides: { other: { defaultRuntimeMode: "auto" } },
+          },
+        },
+        {},
+        [issues[0]!],
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches[0]).toMatchObject({
+        runtimeMode: "approval-required",
+        workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: false },
+      });
+    });
+
+    test("a project override of startFromOrigin wins over the global one", async () => {
+      const { t3, dir, env } = await servers(
+        {
+          settings: {
+            ...global,
+            projectSettingsOverrides: { "project-1": { newWorktreesStartFromOrigin: true } },
+          },
+        },
+        {},
+        [issues[0]!],
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches[0]!.workspaceStrategy).toMatchObject({ startFromOrigin: true });
+    });
+
+    test("flags win over T3's settings", async () => {
+      const { t3, dir, env } = await servers(
+        {
+          settings: {
+            projectSettingsOverrides: {
+              "project-1": {
+                defaultRuntimeMode: "auto",
+                defaultThreadEnvMode: "local",
+                newWorktreesStartFromOrigin: true,
+              },
+            },
+          },
+        },
+        {},
+        [issues[0]!],
+      );
+      const result = await startCli({ cwd: dir, env }, [
+        "run",
+        "--once",
+        "--runtime-mode",
+        "full-access",
+        "--workspace",
+        "worktree",
+        "--start-from-origin",
+        "false",
+      ]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches[0]).toMatchObject({
+        runtimeMode: "full-access",
+        workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: false },
+      });
+    });
+
+    test("with no env mode set in T3, the repository's t3.json picks it, as in T3", async () => {
+      // Read through T3, as the project's folder may be on another machine.
+      const { t3, dir, env } = await servers(
+        {
+          files: { "/work/my-app/t3.json": JSON.stringify({ defaultThreadEnvMode: "worktree" }) },
+          settings: { defaultThreadEnvMode: undefined },
+        },
+        {},
+        [issues[0]!],
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches[0]!.workspaceStrategy).toMatchObject({ type: "worktree" });
+    });
+
+    test("with no env mode set in T3 or t3.json, threads start in the project's checkout, as in T3", async () => {
+      const { t3, dir, env } = await servers(
+        { settings: { defaultThreadEnvMode: undefined } },
+        {},
+        [issues[0]!],
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches[0]).toMatchObject({
+        runtimeMode: "full-access",
+        workspaceStrategy: { type: "root" },
+      });
+    });
+
+    test("--dry-run shows each resolved value and where it came from", async () => {
+      const { dir, env } = await servers(
+        {
+          settings: {
+            ...global,
+            projectSettingsOverrides: { "project-1": { defaultThreadEnvMode: "local" } },
+          },
+        },
+        {},
+        [issues[0]!],
+        { startFromOrigin: true },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain("runtimeMode: approval-required (T3's global setting)");
+      expect(result.stdout).toContain('workspace: local (T3 project "my-app" setting)');
+      expect(result.stdout).toContain(`startFromOrigin: true (${join(dir, LOCAL)})`);
+    });
+
+    test("workspace local runs without startFromOrigin, which only worktrees use", async () => {
+      const { dir, env } = await servers(
+        { settings: { newWorktreesStartFromOrigin: undefined } },
+        { workspace: "local", runtimeMode: "auto" },
+        [issues[0]!],
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--dry-run"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain("startFromOrigin: unused with workspace local");
+    });
+
+    test("--dry-run names the flag a value came from", async () => {
+      const { dir, env } = await servers({}, {}, [issues[0]!]);
+      const result = await startCli({ cwd: dir, env }, [
+        "run",
+        "--dry-run",
+        "--runtime-mode",
+        "auto",
+      ]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain("runtimeMode: auto (--runtime-mode)");
+    });
+
+    test("a T3 without server.getConfig fails with a compatibility error when a key falls to T3", async () => {
+      const { linear, t3, dir, env } = await servers({ providers: null }, { model: undefined });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/T3 .*server\.getConfig.*update T3/i);
+      expect(linear.filters).toEqual([]);
+      expect(t3.launches).toEqual([]);
+    });
   });
 
   const listRefsCalls = (t3: { rpcs: { tag: string; payload: unknown }[] }) =>

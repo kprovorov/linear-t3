@@ -71,6 +71,24 @@ export interface T3Provider {
   models?: T3Model[];
 }
 
+/** The T3 settings that say how new threads start. */
+export interface T3ThreadSettings {
+  defaultRuntimeMode?: string;
+  /** T3 leaves it out when unset: the repository's t3.json applies, else `local`. */
+  defaultThreadEnvMode?: "local" | "worktree";
+  newWorktreesStartFromOrigin?: boolean;
+}
+
+/** T3's settings, from `server.getConfig`: global ones, and each project's overrides of them. */
+export interface T3Settings extends T3ThreadSettings {
+  projectSettingsOverrides?: Record<string, T3ThreadSettings | undefined>;
+}
+
+export interface T3ServerConfig {
+  providers: T3Provider[];
+  settings: T3Settings;
+}
+
 export interface T3Shell {
   projects: T3Project[];
   threads: T3Thread[];
@@ -323,12 +341,28 @@ export class T3Client {
     return undefined;
   }
 
-  /** T3's Providers and their models. Throws T3Incompatible when this T3 can't report them. */
-  async providers(): Promise<T3Provider[]> {
+  /**
+   * T3's Providers and their models, and its settings. Throws T3Incompatible when this T3 can't
+   * report them.
+   */
+  async serverConfig(): Promise<T3ServerConfig> {
     const config = (await this.call("server.getConfig", {}).catch((error: unknown) => {
       throw unknownTag(error, "server.getConfig") ? new T3Incompatible("server.getConfig") : error;
-    })) as { providers: T3Provider[] };
-    return config.providers;
+    })) as T3ServerConfig;
+    return { providers: config.providers, settings: config.settings ?? {} };
+  }
+
+  /**
+   * The text of the file at `relativePath` in the project folder `cwd`, read by T3, or undefined
+   * when there's none. Older T3s report a missing file as a failure.
+   */
+  async readProjectFile(cwd: string, relativePath: string): Promise<string | undefined> {
+    const result = (await this.call("projects.readFile", {
+      cwd,
+      relativePath,
+      allowMissing: true,
+    })) as { contents: string; exists?: boolean };
+    return result.exists === false ? undefined : result.contents;
   }
 
   /** Whether T3 has the thread, active or archived. Deleted threads are absent from both snapshots. */
