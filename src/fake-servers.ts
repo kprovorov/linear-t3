@@ -189,7 +189,46 @@ export interface FakeT3Options {
    * Defaults to one page holding a default `main`. `null`: a T3 without `vcs.listRefs`.
    */
   refPages?: FakeRef[][] | null;
+  /**
+   * The Providers `server.getConfig` reports, as T3 0.1.6 does. Defaults to `DEFAULT_PROVIDERS`.
+   * `null`: a T3 without `server.getConfig`.
+   */
+  providers?: FakeProvider[] | null;
 }
+
+export interface FakeModel {
+  slug: string;
+  name: string;
+  aliases?: string[];
+}
+
+export interface FakeProvider {
+  instanceId: string;
+  displayName?: string;
+  enabled?: boolean;
+  models: FakeModel[];
+}
+
+/** Claude and Codex, both enabled, with some of their models. */
+export const DEFAULT_PROVIDERS: FakeProvider[] = [
+  {
+    instanceId: "claudeAgent",
+    displayName: "Claude",
+    models: [
+      {
+        slug: "claude-opus-5-5",
+        name: "Claude Opus 5.5",
+        aliases: ["opus", "opus-5.5", "claude-opus-5.5"],
+      },
+      {
+        slug: "claude-sonnet-5-5",
+        name: "Claude Sonnet 5.5",
+        aliases: ["sonnet", "sonnet-5.5", "claude-sonnet-5.5"],
+      },
+    ],
+  },
+  { instanceId: "codex", displayName: "Codex", models: [{ slug: "gpt-5.5", name: "GPT-5.5" }] },
+];
 
 export interface FakeRef {
   name: string;
@@ -203,6 +242,7 @@ export async function fakeT3({
   token,
   onLaunch,
   refPages = [[{ name: "main", isDefault: true }]],
+  providers = DEFAULT_PROVIDERS,
 }: FakeT3Options) {
   const requests: string[] = [];
   // Every RPC received, in order.
@@ -289,6 +329,18 @@ export async function fakeT3({
             })),
             nextCursor: cursor + 1 < refPages.length ? cursor + 1 : null,
             totalCount: refPages.flat().length,
+          });
+        } else if (message.tag === "server.getConfig" && providers) {
+          exit(message.id, {
+            providers: providers.map(({ instanceId, displayName, enabled = true, models }) => ({
+              instanceId,
+              driver: instanceId,
+              displayName: displayName ?? instanceId,
+              enabled,
+              status: enabled ? "ready" : "disabled",
+              models: models.map((model) => ({ isCustom: false, capabilities: {}, ...model })),
+            })),
+            settings: {},
           });
         } else {
           // What T3 0.1.6 answers to a request tag it doesn't have.

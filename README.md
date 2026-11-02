@@ -59,7 +59,7 @@ Both write the Credentials file with mode `0600` and leave every other line alon
 Every Config key except the machine settings (`maxRunningThreads`, `t3Url`, `stateFile`) has a flag of the same name in kebab-case, so a run needs no Config file:
 
 ```sh
-npx linear-t3 run --project my-app --team ENG --model claude-opus-5-5 --comment false
+npx linear-t3 run --project my-app --team ENG --model opus-5.5 --comment false
 ```
 
 A flag wins over the Local and Global Config for that key only. Booleans take `true` or `false`, and a bare flag means `true`. `--filter` takes JSON. `run --help` lists every flag with its default and scope.

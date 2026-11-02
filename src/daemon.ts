@@ -22,6 +22,8 @@ import {
   threadIdFor,
   type ModelSelection,
   type T3Project,
+  type T3Model,
+  type T3Provider,
   type WorkspaceStrategy,
 } from "./t3.ts";
 import { stableUuid } from "./uuid.ts";
@@ -114,9 +116,52 @@ function workspaceFor(config: Config, issue: Issue): WorkspaceStrategy {
 }
 
 /**
- * Before the first poll: the T3 project this run watches, and `config` with `baseRef` set, as
- * configured or else the project's default branch. Worktrees need it; `workspace: local` creates
- * none, so it isn't looked up.
+ * The Provider and exact slug for the model `model` names, among enabled Providers (only
+ * `provider`, when set): the exact slug, else the name ignoring case, else an alias.
+ */
+function resolveModel(
+  providers: T3Provider[],
+  model: string,
+  provider: string | undefined,
+): { instanceId: string; model: string } {
+  const searched = providers.filter(
+    (p) => p.enabled && (provider === undefined || p.instanceId === provider),
+  );
+  const lower = model.toLowerCase();
+  const tiers: ((m: T3Model) => boolean)[] = [
+    (m) => m.slug === model,
+    (m) => m.name?.toLowerCase() === lower,
+    (m) => (m.aliases ?? []).includes(model),
+  ];
+  for (const matches of tiers) {
+    const candidates = searched.flatMap((p) => {
+      // T3 may leave out the models of a Provider that isn't installed.
+      const found = (p.models ?? []).find(matches);
+      return found ? [{ instanceId: p.instanceId, model: found.slug }] : [];
+    });
+    if (candidates.length === 1) return candidates[0]!;
+    if (candidates.length > 1) {
+      const list = candidates.map((c) => `${c.model} on ${c.instanceId}`).join(", ");
+      throw new Error(
+        `Model "${model}" is offered by several T3 Providers: ${list}. Pick one with --provider`,
+      );
+    }
+  }
+  const names = searched.map((p) => p.instanceId).join(", ");
+  const where =
+    provider === undefined
+      ? `the enabled T3 Providers (${names || "none"})`
+      : searched.length > 0
+        ? `T3 Provider "${provider}"`
+        : `T3 Provider "${provider}", which isn't an enabled Provider in T3`;
+  throw new Error(`No model matches "${model}" in ${where}`);
+}
+
+/**
+ * Before the first poll: the T3 project this run watches, and `config` with `model` and
+ * `provider` resolved through T3's model catalog and `baseRef` set, as configured or else the
+ * project's default branch. Worktrees need it; `workspace: local` creates none, so it isn't
+ * looked up.
  */
 async function prepare(
   loaded: Config,
@@ -127,7 +172,18 @@ async function prepare(
   const closeOnShutdown = () => t3.close();
   shutdown.signal.addEventListener("abort", closeOnShutdown, { once: true });
   try {
-    const project = findProject((await t3.readShell()).projects, loaded);
+    const [shell, providers] = await Promise.all([
+      t3.readShell(),
+      loaded.model === undefined ? undefined : t3.providers(),
+    ]);
+    const project = findProject(shell.projects, loaded);
+    if (loaded.model !== undefined && providers !== undefined) {
+      const { instanceId, model } = resolveModel(providers, loaded.model, loaded.provider);
+      if (model !== loaded.model || instanceId !== loaded.provider) {
+        log(`model "${loaded.model}" is ${model} on ${instanceId}`);
+      }
+      loaded = { ...loaded, model, provider: instanceId };
+    }
     if (loaded.workspace === "local" || loaded.baseRef !== undefined) {
       return { config: loaded, project };
     }
@@ -188,8 +244,8 @@ function launchKey(issueId: string, attempt: number): string {
 }
 
 /**
- * `model` on `provider`, else on the Provider of the T3 project's default model; with no `model`,
- * the T3 project's default model, options included.
+ * `model` on `provider`, as `prepare` resolved them; with no `model`, the T3 project's default
+ * model, options included.
  */
 function modelFor(config: Config, project: T3Project): ModelSelection {
   const fallback = project.defaultModelSelection;
@@ -204,13 +260,9 @@ function modelFor(config: Config, project: T3Project): ModelSelection {
     }
     return fallback;
   }
-  const instanceId = config.provider ?? fallback?.instanceId;
-  if (instanceId === undefined) {
-    throw new Error(
-      `No provider configured for model "${config.model}" and T3 project "${project.title}" has no default model to take it from`,
-    );
-  }
-  return { instanceId, model: config.model };
+  // prepare resolves the Provider whenever a model is set.
+  if (config.provider === undefined) throw new Error("provider is unresolved");
+  return { instanceId: config.provider, model: config.model };
 }
 
 async function launchIssue(
