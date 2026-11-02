@@ -773,6 +773,14 @@ describe("cli run against fake Linear and T3", () => {
       expect(launched(t3)).toEqual(["ENG-2"]);
     });
 
+    test("a single status or label in the Local Config may be a string", async () => {
+      const local = { status: "backlog", label: "b" };
+      const { t3, dir, env } = await servers({}, {}, queue, local, { labels });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-2"]);
+    });
+
     test("status and label from the Local Config, with a raw filter, launch only issues matching all", async () => {
       const { linear, t3, dir, env } = await servers(
         {},

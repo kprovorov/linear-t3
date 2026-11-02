@@ -39,6 +39,12 @@ export interface KeyDeclaration<S extends z.ZodType = z.ZodType> {
   defaultText?: string;
 }
 
+/** A list key: an array of names, or in a file, one name on its own. */
+const list = z.preprocess(
+  (value) => (typeof value === "string" ? [value] : value),
+  z.array(z.string().min(1)).min(1),
+);
+
 const declare = <S extends z.ZodType>(declaration: KeyDeclaration<S>) => declaration;
 
 /**
@@ -76,7 +82,7 @@ export const KEYS = {
   status: declare({
     type: "list",
     scope: "local",
-    schema: z.array(z.string().min(1)).min(1),
+    schema: list,
     description:
       "a workflow status of the team that issues must be in; repeat it to accept any of several",
     arg: "<status>",
@@ -85,7 +91,7 @@ export const KEYS = {
   label: declare({
     type: "list",
     scope: "local",
-    schema: z.array(z.string().min(1)).min(1),
+    schema: list,
     description: "a label of the team that issues must carry; repeat it to require all of several",
     arg: "<label>",
     defaultText: "any labels",
