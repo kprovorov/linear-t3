@@ -45,6 +45,28 @@ const list = z.preprocess(
   z.array(z.string().min(1)).min(1),
 );
 
+/** Linear's priorities, most urgent first, by the number Linear gives each. */
+export const PRIORITIES = { urgent: 1, high: 2, medium: 3, low: 4 } as const;
+
+/** A priority, as its name or its number (in a file, also as a JSON number), read as the number. */
+const priority = z.unknown().transform((value, ctx) => {
+  const text = typeof value === "string" || typeof value === "number" ? String(value) : "";
+  const name = text.toLowerCase();
+  if (/^[1-4]$/.test(text)) return Number(text);
+  if (Object.hasOwn(PRIORITIES, name)) return PRIORITIES[name as keyof typeof PRIORITIES];
+  ctx.addIssue({ code: "custom", message: "Use urgent, high, medium, low, or 1 to 4." });
+  return z.NEVER;
+});
+
+/** `me`, `none` (either ignoring case, read in lower case), or an assignee's email address. */
+const assignee = z.preprocess(
+  (value) =>
+    typeof value === "string" && /^(me|none)$/i.test(value) ? value.toLowerCase() : value,
+  z.union([z.literal("me"), z.literal("none"), z.email()], {
+    error: "Use me, none, or an email address.",
+  }),
+);
+
 const declare = <S extends z.ZodType>(declaration: KeyDeclaration<S>) => declaration;
 
 /**
@@ -95,6 +117,24 @@ export const KEYS = {
     description: "a label of the team that issues must carry; repeat it to require all of several",
     arg: "<label>",
     defaultText: "any labels",
+  }),
+  assignee: declare({
+    type: "string",
+    scope: "local",
+    schema: assignee,
+    description:
+      "whose issues to watch: me, the owner of the Linear token; an email address; or none, for unassigned issues",
+    arg: "<assignee>",
+    defaultText: "anyone",
+  }),
+  priority: declare({
+    type: "string",
+    scope: "local",
+    schema: priority,
+    description:
+      "the least urgent priority to watch: urgent, high, medium, low, or 1 to 4; issues with no priority never match",
+    arg: "<priority>",
+    defaultText: "any priority",
   }),
   setStatus: declare({
     type: "string",
@@ -226,6 +266,10 @@ export interface Config {
   status?: string[];
   /** Label names, matched ignoring case; an issue must carry all of them. */
   label?: string[];
+  /** `me`, `none` or an email address. */
+  assignee?: string;
+  /** 1 (Urgent) to 4 (Low); issues at this priority or a more urgent one match. */
+  priority?: number;
   filter?: Value<"filter">;
   setStatus?: string;
   comment: boolean;
@@ -263,7 +307,7 @@ const RENAMED: Record<string, string> = {
 const MIGRATION = [
   "The Config is now flat, one T3 project per run. Rewrite it as:",
   `  - the Global Config: t3Url, maxRunningThreads, stateFile and any shared defaults`,
-  `  - a ${LOCAL_CONFIG_NAME} in each repository: project, team, status, label, filter, setStatus`,
+  `  - a ${LOCAL_CONFIG_NAME} in each repository: project, team, status, label, assignee, priority, filter, setStatus`,
   "Renamed keys:",
   "  linear.team → team, linear.filter → filter",
   "  linear.onLaunch.moveToState → setStatus, linear.onLaunch.comment → comment",
@@ -453,6 +497,8 @@ export async function loadConfig({
     team: required("team"),
     status: get("status"),
     label: get("label"),
+    assignee: get("assignee"),
+    priority: get("priority"),
     filter: get("filter"),
     setStatus: get("setStatus"),
     comment: required("comment"),

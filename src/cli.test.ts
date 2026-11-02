@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   DEFAULT_PROVIDERS,
+  FAKE_VIEWER,
   type FakeIssue,
   type FakeProvider,
   type FakeT3Options,
@@ -214,6 +215,8 @@ describe("cli", () => {
       ["--team <team>", "required", "local"],
       ["--status <status>", "default: any status", "local"],
       ["--label <label>", "default: any labels", "local"],
+      ["--assignee <assignee>", "default: anyone", "local"],
+      ["--priority <priority>", "default: any priority", "local"],
       ["--filter <json>", "default: none", "local"],
       ["--set-status <status>", "default: leave the status as it is", "local"],
       ["--comment [true|false]", "default: true", "all"],
@@ -383,6 +386,15 @@ describe("cli run", () => {
         `Invalid config ${f.global}:`,
         "status: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
         "label: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
+      ],
+    },
+    {
+      case: "assignee and priority in the Global Config",
+      global: { assignee: "me", priority: "high" },
+      errors: (f) => [
+        `Invalid config ${f.global}:`,
+        "assignee: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
+        "priority: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
       ],
     },
     {
@@ -831,6 +843,91 @@ describe("cli run against fake Linear and T3", () => {
       "$args exits non-zero before the first poll, listing the valid names",
       async ({ args, error }) => {
         const { linear, t3, dir, env } = await servers({}, {}, queue, {}, { labels });
+        const result = await startCli({ cwd: dir, env }, ["run", "--once", ...args]).result;
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain(error);
+        expect(linear.filters).toEqual([]);
+        expect(t3.launches).toEqual([]);
+      },
+    );
+  });
+
+  describe("assignee and priority", () => {
+    // The fake Linear's token belongs to ada@example.com.
+    const queue: FakeIssue[] = [
+      { id: "i-1", identifier: "ENG-1", title: "Mine", assignee: "ada@example.com", priority: 3 },
+      { id: "i-2", identifier: "ENG-2", title: "Bob's", assignee: "bob@example.com", priority: 1 },
+      { id: "i-3", identifier: "ENG-3", title: "Nobody's", priority: 2 },
+      { id: "i-4", identifier: "ENG-4", title: "Low", assignee: "bob@example.com", priority: 4 },
+      { id: "i-5", identifier: "ENG-5", title: "No priority", priority: 0 },
+    ];
+    const users = [FAKE_VIEWER, { id: "user-2", email: "bob@example.com" }];
+    const launched = (t3: { launches: Record<string, unknown>[] }) =>
+      t3.launches.map((launch) => String(launch.title).split(":")[0]).sort();
+
+    test.each<{ args: string[]; expected: string[] }>([
+      { args: ["--assignee", "me"], expected: ["ENG-1"] },
+      { args: ["--assignee", "None"], expected: ["ENG-3", "ENG-5"] },
+      { args: ["--assignee", "Bob@Example.com"], expected: ["ENG-2", "ENG-4"] },
+      { args: ["--assignee", "none"], expected: ["ENG-3", "ENG-5"] },
+      { args: ["--priority", "high"], expected: ["ENG-2", "ENG-3"] },
+      { args: ["--priority", "2"], expected: ["ENG-2", "ENG-3"] },
+      { args: ["--priority", "Urgent"], expected: ["ENG-2"] },
+      { args: ["--priority", "low"], expected: ["ENG-1", "ENG-2", "ENG-3", "ENG-4"] },
+      { args: ["--assignee", "bob@example.com", "--priority", "medium"], expected: ["ENG-2"] },
+    ])("$args launches $expected", async ({ args, expected }) => {
+      const { t3, dir, env } = await servers({}, {}, queue, {}, { users });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once", ...args]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(expected);
+    });
+
+    test("assignee and priority from the Local Config, with a raw filter, are ANDed with the team", async () => {
+      const local = {
+        assignee: "none",
+        priority: 3,
+        filter: { state: { type: { eq: "unstarted" } } },
+      };
+      const backlog = {
+        id: "i-6",
+        identifier: "ENG-6",
+        title: "Later",
+        priority: 2,
+        status: "Backlog",
+      };
+      const { linear, t3, dir, env } = await servers({}, {}, [...queue, backlog], local);
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-3"]);
+      expect(linear.filters).toEqual([
+        {
+          and: [
+            { team: { key: { eq: "ENG" } } },
+            { assignee: { null: true } },
+            { priority: { gte: 1, lte: 3 } },
+            { state: { type: { eq: "unstarted" } } },
+          ],
+        },
+      ]);
+    });
+
+    test.each<{ args?: string[]; local?: Record<string, unknown>; error: string }>([
+      { args: ["--priority", "critical"], error: "--priority" },
+      { args: ["--priority", "0"], error: "--priority" },
+      { args: ["--priority", "5"], error: "--priority" },
+      { args: ["--assignee", "bob"], error: "--assignee" },
+      { local: { priority: 5 }, error: "priority:" },
+      { local: { assignee: "someone" }, error: "assignee:" },
+      { local: { priority: "toString" }, error: "priority:" },
+      { local: { priority: true }, error: "Use urgent, high, medium, low, or 1 to 4." },
+      {
+        args: ["--assignee", "carol@example.com"],
+        error: 'No Linear user has the email "carol@example.com"',
+      },
+    ])(
+      "an invalid value ($args $local) exits non-zero before the first poll",
+      async ({ args = [], local = {}, error }) => {
+        const { linear, t3, dir, env } = await servers({}, {}, queue, local, { users });
         const result = await startCli({ cwd: dir, env }, ["run", "--once", ...args]).result;
         expect(result.status).not.toBe(0);
         expect(result.stderr).toContain(error);

@@ -18,6 +18,8 @@ export interface FakeIssue {
   status?: string;
   /** Label names, each one of the team's labels. */
   labels?: string[];
+  /** The assignee's email. Unset: unassigned. */
+  assignee?: string;
 }
 
 /** A workflow status of the fake team. */
@@ -35,6 +37,9 @@ export const FAKE_STATUSES: FakeStatus[] = [
   { name: "In Progress", type: "started" },
   { name: "Done", type: "completed" },
 ];
+
+/** The user who owns the fake Linear's token. */
+export const FAKE_VIEWER = { id: "user-1", name: "Ada", email: "ada@example.com" };
 
 class UnsupportedFilter extends Error {}
 
@@ -90,6 +95,27 @@ function matches(issue: FakeIssue, filter: unknown, statuses: FakeStatus[]): boo
             ),
           );
         });
+      case "assignee":
+        return Object.entries(criteria).every(([key, comparator]) => {
+          if (key === "null") return (issue.assignee === undefined) === comparator;
+          if (issue.assignee === undefined) return false;
+          if (key === "email") return compare(issue.assignee, comparator, "assignee.email");
+          if (key === "isMe") {
+            const { eq, ...rest } = comparator as { eq?: unknown };
+            if (typeof eq !== "boolean" || Object.keys(rest).length > 0) {
+              throw new UnsupportedFilter("assignee.isMe");
+            }
+            return (issue.assignee === FAKE_VIEWER.email) === eq;
+          }
+          throw new UnsupportedFilter(`assignee.${key}`);
+        });
+      case "priority":
+        return Object.entries(criteria).every(([op, operand]) => {
+          const priority = issue.priority ?? 0;
+          if (op === "gte" && typeof operand === "number") return priority >= operand;
+          if (op === "lte" && typeof operand === "number") return priority <= operand;
+          throw new UnsupportedFilter(`priority.${op}`);
+        });
       default:
         throw new UnsupportedFilter(field);
     }
@@ -125,7 +151,14 @@ export async function fakeLinear(
     apiKey,
     statuses = FAKE_STATUSES,
     labels = [],
-  }: { apiKey?: string; statuses?: FakeStatus[]; labels?: string[] } = {},
+    users = [FAKE_VIEWER],
+  }: {
+    apiKey?: string;
+    statuses?: FakeStatus[];
+    labels?: string[];
+    /** The workspace's users, found by email. */
+    users?: { id: string; email: string }[];
+  } = {},
 ) {
   const queries: string[] = [];
   // The input of each comment created.
@@ -149,8 +182,7 @@ export async function fakeLinear(
       return;
     }
     if (/\bviewer\b/.test(query)) {
-      const viewer = { id: "user-1", name: "Ada", email: "ada@example.com" };
-      res.end(JSON.stringify({ data: { viewer } }));
+      res.end(JSON.stringify({ data: { viewer: FAKE_VIEWER } }));
       return;
     }
     if (/\bcommentCreate\b/.test(query)) {
@@ -158,6 +190,14 @@ export async function fakeLinear(
       comments.push(input);
       const commentCreate = { success: true, lastSyncId: 0, comment: { id: input.id } };
       res.end(JSON.stringify({ data: { commentCreate } }));
+      return;
+    }
+    if (/\busers\b/.test(query)) {
+      const { email } = variables as { email?: string };
+      const nodes = users
+        .filter((user) => user.email.toLowerCase() === email?.toLowerCase())
+        .map(({ id }) => ({ id }));
+      res.end(JSON.stringify({ data: { users: connection(nodes) } }));
       return;
     }
     if (/\bworkflowStates\b/.test(query)) {
@@ -195,6 +235,7 @@ export async function fakeLinear(
       team: undefined,
       status: undefined,
       labels: undefined,
+      assignee: undefined,
       updatedAt: new Date(0).toISOString(),
       // The SDK's Issue model reads these unconditionally.
       sharedAccess: { isShared: false, sharedWithCount: 0, sharedWithUsers: [] },
