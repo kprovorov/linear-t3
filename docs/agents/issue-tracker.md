@@ -17,9 +17,12 @@ Workflow states: Backlog → Todo → In Progress → In Review → Done (also C
 
 ## Interaction with the linear-t3 daemon
 
-This repo's daemon polls Linear and launches T3 threads for issues matching each project's
-`linear.filter` in `config.json`, then may move them (e.g. to "In Progress"). Before relabelling
-or moving a WF issue, check whether that would make the daemon pick it up.
+This repo's daemon polls Linear and launches T3 threads for issues matching the filters it runs
+with: the `team`, `status`, `label`, `assignee`, `priority` and `filter` keys of its Local Config
+(a `linear-t3.config.json`), overridden by any flags its background service was started with. The
+daemon then moves each launched issue to `setStatus` ("In Progress" by default). `linear-t3 status`
+shows the pinned project and Local Config. Before relabelling or moving a WF issue, check whether
+that would make the daemon pick it up.
 
 ## When a skill says "publish to the issue tracker"
 
