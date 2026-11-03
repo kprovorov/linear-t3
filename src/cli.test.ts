@@ -214,7 +214,7 @@ describe("cli", () => {
       ["--project <project>", "default: the T3 project whose folder is the Git root", "local"],
       ["--team <team>", "required", "local"],
       ["--status <status>", "default: any status", "local"],
-      ["--label <label>", "default: any labels", "local"],
+      ["--label <label>", "default: any labels", "all"],
       ["--assignee <assignee>", "default: anyone", "local"],
       ["--priority <priority>", "default: any priority", "local"],
       ["--filter <json>", "default: none", "local"],
@@ -397,12 +397,11 @@ describe("cli run", () => {
       ],
     },
     {
-      case: "status and label in the Global Config",
+      case: "status in the Global Config",
       global: { status: ["Todo"], label: ["ready-for-agent"] },
       errors: (f) => [
         `Invalid config ${f.global}:`,
         "status: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
-        "label: only goes in a Local Config (linear-t3.config.json in the repository, or --config)",
       ],
     },
     {
@@ -810,6 +809,33 @@ describe("cli run against fake Linear and T3", () => {
         .result;
       expect(result).toMatchObject({ status: 0, stderr: "" });
       expect(launched(t3)).toEqual(["ENG-2"]);
+    });
+
+    test("labels from the Global Config, the Local Config and --label add up", async () => {
+      const { t3, dir, env } = await servers(
+        {},
+        { label: "c" },
+        queue,
+        { label: ["a"] },
+        { labels },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once", "--label", "B"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-4"]);
+    });
+
+    test("a label set in more than one layer counts once, ignoring case", async () => {
+      const { linear, t3, dir, env } = await servers(
+        {},
+        { label: "A" },
+        queue,
+        { label: ["a", "b"] },
+        { labels },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once", "--label", "b"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-2", "ENG-4"]);
+      expect(JSON.stringify(linear.filters[0]).match(/eqIgnoreCase/g)).toHaveLength(2);
     });
 
     test("a single status or label in the Local Config may be a string", async () => {
@@ -2232,7 +2258,7 @@ function launchdPinned(agent: string) {
 }
 
 /** Tests for what `start` checks first and for commands that need the service installed. */
-function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
+function startAndInstalledChecks(service: (labels?: string[]) => Promise<ServiceSetup>) {
   test.each<{
     case: string;
     breaks: (files: Record<string, string>) => void;
@@ -2367,6 +2393,28 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
     ]);
   });
 
+  test("start pins a repeated list flag as the flag repeated, which run reads back as the list", async () => {
+    const setup = await service();
+    rmSync(setup.files.local);
+    const result = await setup.cli(
+      "start",
+      "--team",
+      "ENG",
+      "--status",
+      "Todo",
+      "--label",
+      "ready-for-agent",
+      "--label",
+      "mac",
+    );
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(setup.pinned().args.slice(6)).toEqual([
+      "--status=Todo",
+      "--label=ready-for-agent",
+      "--label=mac",
+    ]);
+  });
+
   /** Runs the installed unit's command once, from `cwd`, as the service manager would. */
   function runPinned(setup: ServiceSetup, cwd: string) {
     const { args, env } = setup.pinned();
@@ -2387,6 +2435,21 @@ function startAndInstalledChecks(service: () => Promise<ServiceSetup>) {
     const result = await runPinned(setup, stray);
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(setup.linearFilters()).toEqual([{ and: [{ team: { key: { eq: "OPS" } } }, {}] }]);
+  });
+
+  test("the Daemon requires the labels of the Global Config, the Local Config and the pinned --label", async () => {
+    const setup = await service(["mac", "ready-for-agent", "ios"]);
+    const { files, cli } = setup;
+    const global = JSON.parse(readFileSync(files.config, "utf8")) as Record<string, unknown>;
+    writeFile(files.config, JSON.stringify({ ...global, label: "mac" }));
+    writeFile(files.local, JSON.stringify({ team: "OPS", label: "ready-for-agent" }));
+    expect((await cli("start", "--label", "ios")).status).toBe(0);
+    const result = await runPinned(setup, tmpdir());
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    const filter = JSON.stringify(setup.linearFilters()[0]);
+    for (const label of ["mac", "ready-for-agent", "ios"]) {
+      expect(filter).toContain(`{"labels":{"some":{"name":{"eqIgnoreCase":"${label}"}}}}`);
+    }
   });
 
   test("a multi-line flag is pinned as written", async () => {
@@ -2488,8 +2551,8 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
    * those tokens, and a stand-in `launchctl` on `PATH` that records each call. `launchctl print`
    * shows `printed` once it is set, else fails the way it does for an agent that isn't loaded.
    */
-  async function service() {
-    const linear = await fakeLinear([], { apiKey: "lin-key", teams: ["ENG", "OPS"] });
+  async function service(labels: string[] = []) {
+    const linear = await fakeLinear([], { apiKey: "lin-key", teams: ["ENG", "OPS"], labels });
     const dir = repoDir();
     const projects = [{ id: "project-1", title: "my-app", workspaceRoot: dir }];
     const t3 = await fakeT3({ projects, token: "t3-tok" });
@@ -2819,8 +2882,8 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
    * isn't running. `journalctl` prints `journal line` and, with `-f`, waits to be stopped. `loginctl`
    * says whether lingering is on.
    */
-  async function service() {
-    const linear = await fakeLinear([], { apiKey: "lin-key", teams: ["ENG", "OPS"] });
+  async function service(labels: string[] = []) {
+    const linear = await fakeLinear([], { apiKey: "lin-key", teams: ["ENG", "OPS"], labels });
     const dir = repoDir();
     const projects = [{ id: "project-1", title: "my-app", workspaceRoot: dir }];
     const t3 = await fakeT3({ projects, token: "t3-tok" });
