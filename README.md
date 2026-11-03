@@ -89,7 +89,7 @@ Each key resolves on its own, highest first:
 4. The T3 project's own setting, or T3's global setting, for keys T3 has one for.
 5. The built-in default.
 
-A key a layer doesn't set falls through to the next one. A list set in a higher layer replaces the lower one; lists never merge, so `--label Bug` means exactly "label Bug". `--config` replaces the discovered Local Config; it doesn't add to it.
+A key a layer doesn't set falls through to the next one. A list set in a higher layer replaces the lower one, so `--status Backlog` means exactly "status Backlog". `label` is the exception: every layer's labels add up, so `"label": "mac"` in the Global Config, `"label": "ready-for-agent"` in the Local Config and `--label bug` watch issues that carry all three. `--config` replaces the discovered Local Config; it doesn't add to it.
 
 Booleans take `true` or `false`, and a bare flag means `true` (`--comment` is `--comment true`). List keys take a string or an array in a file, and a repeated flag on the CLI (`--status Todo --status Backlog`). `--filter` takes JSON.
 
@@ -147,7 +147,7 @@ The nearest `linear-t3.config.json` from the working directory up to the Git roo
 | `team`              | `--team <team>`                     | local  | required                                                                             |
 | `filter`            | `--filter <json>`                   | local  | none                                                                                 |
 | `status`            | `--status <status>`                 | local  | any status                                                                           |
-| `label`             | `--label <label>`                   | local  | any labels                                                                           |
+| `label`             | `--label <label>`                   | all    | any labels                                                                           |
 | `assignee`          | `--assignee <assignee>`             | local  | anyone                                                                               |
 | `priority`          | `--priority <priority>`             | local  | any priority                                                                         |
 | `setStatus`         | `--set-status <status\|false>`      | local  | In Progress                                                                          |
@@ -170,7 +170,7 @@ What each one does:
 - **`team`**: the Linear team key whose issues to watch, for example `FIT`.
 - **`filter`**: a raw Linear [`IssueFilter`](https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter), ANDed with the team and the named filters below. Use it for anything they don't cover, such as `{ "hasBlockedByRelations": { "eq": false } }`.
 - **`status`**: workflow statuses of the team; an issue must be in any of them. Names match ignoring case.
-- **`label`**: labels of the team; an issue must carry all of them. Names match ignoring case.
+- **`label`**: labels of the team; an issue must carry all of them. Names match ignoring case. Labels from the CLI, the Local Config and the Global Config add up, so a label in the Global Config, such as one for this machine, applies to every run on it.
 - **`assignee`**: `me` (the owner of the Linear API key), an email address, or `none` for unassigned issues.
 - **`priority`**: `urgent`, `high`, `medium`, `low`, or `1` to `4`. Matches that priority or anything more urgent, so `high` also picks up urgent issues. Issues with no priority never match.
 - **`setStatus`**: the team's workflow status to move an issue to once its thread starts, or `false` to leave it alone.

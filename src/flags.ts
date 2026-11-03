@@ -73,6 +73,10 @@ export function flagArgs(values: Values): string[] {
   return flagKeys.flatMap((key) => {
     const value: unknown = values[key];
     if (value === undefined) return [];
+    // A list flag takes one item, so a list is the flag repeated, as it was typed.
+    if (KEYS[key].type === "list") {
+      return (value as string[]).map((item) => `--${flagName(key)}=${item}`);
+    }
     // Strings as typed; JSON writes booleans, numbers and filters the way their flags read them.
     const text = typeof value === "string" ? value : JSON.stringify(value);
     return [`--${flagName(key)}=${text}`];

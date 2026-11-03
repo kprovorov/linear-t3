@@ -37,6 +37,11 @@ export interface KeyDeclaration<S extends z.ZodType = z.ZodType> {
   arg?: string;
   /** What help says the default is, when `fallback` is unset or doesn't read well. */
   defaultText?: string;
+  /**
+   * A `list` whose layers add up instead of the highest one winning: the CLI's, the Local Config's
+   * and the Global Config's items together, each name once, ignoring case.
+   */
+  merges?: boolean;
 }
 
 /** A list key: an array of names, or in a file, one name on its own. */
@@ -112,9 +117,11 @@ export const KEYS = {
   }),
   label: declare({
     type: "list",
-    scope: "local",
+    scope: "all",
     schema: list,
-    description: "a label of the team that issues must carry; repeat it to require all of several",
+    merges: true,
+    description:
+      "a label of the team that issues must carry; repeat it to require all of several. Adds to the labels in the Config files",
     arg: "<label>",
     defaultText: "any labels",
   }),
@@ -315,7 +322,7 @@ const RENAMED: Record<string, string> = {
 
 const MIGRATION = [
   "The Config is now flat, one T3 project per run. Rewrite it as:",
-  `  - the Global Config: t3Url, maxRunningThreads, stateFile and any shared defaults`,
+  `  - the Global Config: t3Url, maxRunningThreads, stateFile and any shared defaults, such as labels`,
   `  - a ${LOCAL_CONFIG_NAME} in each repository: project, team, status, label, assignee, priority, filter, setStatus`,
   "Renamed keys:",
   "  linear.team → team, linear.filter → filter",
@@ -451,7 +458,7 @@ export interface ConfigSources {
 
 /**
  * The effective Config: per key, the CLI flags, else the Local Config, else the Global Config,
- * else the built-in default. Keys T3's settings default are left unset for the Daemon to fill in. A value replaces the lower one whole; lists and objects never merge.
+ * else the built-in default. Keys T3's settings default are left unset for the Daemon to fill in. A value replaces the lower one whole, except a `merges` list (`label`), which adds every layer's items.
  */
 export async function loadConfig({
   global: globalPath,
@@ -480,6 +487,7 @@ export async function loadConfig({
   const layers = [cliLayer, localLayer, globalLayer].filter((layer) => layer !== undefined);
   const sources: Config["sources"] = {};
   const pick = <K extends Key>(key: K): { value?: Value<K>; layer?: Layer } => {
+    if ((KEYS[key] as KeyDeclaration).merges) return { value: merge(key) as Value<K> };
     for (const layer of layers) {
       if (layer.values[key] !== undefined) {
         sources[key] = layer.path ?? `--${flagName(key)}`;
@@ -489,6 +497,17 @@ export async function loadConfig({
     const fallback = (KEYS[key] as KeyDeclaration).fallback as Value<K> | undefined;
     if (fallback !== undefined) sources[key] = "default";
     return { value: fallback };
+  };
+  /** Every layer's items of a `merges` list, lowest layer first, each name once ignoring case. */
+  const merge = (key: Key): string[] | undefined => {
+    const setting = [...layers].reverse().filter((layer) => layer.values[key] !== undefined);
+    if (setting.length === 0) return undefined;
+    sources[key] = setting.map((layer) => layer.path ?? `--${flagName(key)}`).join(", ");
+    const items = setting.flatMap((layer) => layer.values[key] as string[]);
+    return items.filter(
+      (item, index) =>
+        items.findIndex((other) => other.toLowerCase() === item.toLowerCase()) === index,
+    );
   };
   const get = <K extends Key>(key: K) => pick(key).value;
   const required = <K extends Key>(key: K): Value<K> => {

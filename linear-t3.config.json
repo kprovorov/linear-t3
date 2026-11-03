@@ -1,0 +1,12 @@
+{
+  "team": "WF",
+  "status": "Todo",
+  "label": [
+    "ready-for-agent"
+  ],
+  "filter": {
+    "hasBlockedByRelations": {
+      "eq": false
+    }
+  }
+}
