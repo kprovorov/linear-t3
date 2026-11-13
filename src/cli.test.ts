@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -15,7 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { setTimeout } from "node:timers/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
@@ -2359,6 +2360,15 @@ interface ServiceSetup {
   unitOf: (project: string) => string;
   /** How service manager calls name T3 project `project`'s Daemon. */
   unitName: (project: string) => string;
+  /** The unit file of the single background service from before per-project Daemons. */
+  legacyUnit: string;
+  /**
+   * Turns the unit `start` installed for `project-1` into the old single service's, as the
+   * previous release wrote it; unpinned, as 0.2 wrote it, with no `--project`.
+   */
+  makeLegacy: (pinned: boolean) => void;
+  /** Whether a call started T3 project `project`'s Daemon. */
+  started: (project: string) => boolean;
 }
 
 /** Undoes a unit file's escaping of one quoted word; ExecStart words also doubled `$`. */
@@ -2813,6 +2823,107 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
       expect(result.stdout).toContain(`Unit:          ${setup.unitOf("project-2")}\n`);
     });
   });
+
+  // Each test runs the CLI several times, against T3.
+  describe("migrating the old single background service", { timeout: 30_000 }, () => {
+    /** `service()` with only the old single service installed, pinned unless `pinned` is false. */
+    async function legacy(options: { pinned?: boolean; running?: boolean } = {}) {
+      const setup = await service();
+      expect((await setup.cli("start")).status).toBe(0);
+      const before = setup.pinned();
+      setup.makeLegacy(options.pinned ?? true);
+      const old = readFileSync(setup.legacyUnit, "utf8");
+      if (options.running ?? true) setup.markRunning();
+      setup.resetCalls();
+      return { ...setup, old, before };
+    }
+
+    /** What's in the unit directory, so a leftover or a duplicate unit shows. */
+    const units = (setup: ServiceSetup) =>
+      readdirSync(dirname(setup.legacyUnit)).filter((file) => file.startsWith("linear-t3"));
+
+    test.each(["status", "start"])(
+      "%s moves a running old unit to the project's Daemon and keeps it running",
+      async (command) => {
+        const setup = await legacy();
+        const result = await setup.cli(command);
+        expect(result).toMatchObject({ status: 0, stderr: "" });
+        expect(result.stdout).toContain(`Moved the old background service (${setup.legacyUnit})`);
+        expect(existsSync(setup.legacyUnit)).toBe(false);
+        expect(units(setup)).toEqual([basename(setup.files.unit)]);
+        expect(setup.pinned()).toEqual(setup.before);
+        expect(setup.started("project-1")).toBe(true);
+      },
+    );
+
+    test("status moves a stopped old unit to the project's Daemon without starting it", async () => {
+      const setup = await legacy({ running: false });
+      const result = await setup.cli("status");
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(existsSync(setup.legacyUnit)).toBe(false);
+      expect(units(setup)).toEqual([basename(setup.files.unit)]);
+      expect(setup.started("project-1")).toBe(false);
+      expect(result.stdout).toContain("Daemon:        stopped\n");
+    });
+
+    test("status removes an old unit pinned to no project and says to run start again", async () => {
+      const setup = await legacy({ pinned: false });
+      const result = await setup.cli("status");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(`Removed the old background service (${setup.legacyUnit})`);
+      expect(result.stdout).toContain("run `linear-t3 start` in the repository it should watch");
+      expect(units(setup)).toEqual([]);
+      expect(setup.started("project-1")).toBe(false);
+    });
+
+    test("an old unit whose project already has a Daemon is just removed", async () => {
+      const setup = await legacy();
+      expect((await setup.cli("start", "--team", "OPS")).status).toBe(0);
+      // `start` migrated the old unit first; put it back next to the new one.
+      writeFile(setup.legacyUnit, setup.old);
+      const current = readFileSync(setup.files.unit, "utf8");
+      setup.resetCalls();
+      const result = await setup.cli("status");
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(units(setup)).toEqual([basename(setup.files.unit)]);
+      expect(readFileSync(setup.files.unit, "utf8")).toBe(current);
+      expect(setup.started("project-1")).toBe(false);
+    });
+
+    test.each(["status", "start"])(
+      "%s again after migrating moves nothing more",
+      async (command) => {
+        const setup = await legacy();
+        expect((await setup.cli(command)).status).toBe(0);
+        const migrated = readFileSync(setup.files.unit, "utf8");
+        setup.resetCalls();
+        const result = await setup.cli("status");
+        expect(result).toMatchObject({ status: 0, stderr: "" });
+        expect(result.stdout).not.toContain("old background service");
+        expect(units(setup)).toEqual([basename(setup.files.unit)]);
+        expect(readFileSync(setup.files.unit, "utf8")).toBe(migrated);
+        expect(setup.started("project-1")).toBe(false);
+      },
+    );
+
+    test("start in the old unit's project ends with exactly one Daemon, with the new flags", async () => {
+      const setup = await legacy();
+      const result = await setup.cli("start", "--team", "OPS");
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain('Pinned to T3 project "my-app" (project-1)');
+      expect(units(setup)).toEqual([basename(setup.files.unit)]);
+      expect(setup.pinned().args).toContain("--team=OPS");
+    });
+
+    test("start after removing an unpinned old unit installs the Daemon it was asked for", async () => {
+      const setup = await legacy({ pinned: false });
+      const result = await setup.cli("start");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Removed the old background service");
+      expect(units(setup)).toEqual([basename(setup.files.unit)]);
+      expect(setup.started("project-1")).toBe(true);
+    });
+  });
 }
 
 // launchd only exists on macOS; CI runs this suite on a macOS runner.
@@ -2878,6 +2989,19 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
         join(home.HOME, "Library", "LaunchAgents", `linear-t3.${project}.plist`),
       unitName: (project: string) => `linear-t3.${project}`,
       logOf: (project: string) => join(home.XDG_STATE_HOME, "linear-t3", `daemon-${project}.log`),
+      legacyUnit: join(home.HOME, "Library", "LaunchAgents", "linear-t3.plist"),
+      makeLegacy(pinned: boolean) {
+        const agent = readFileSync(files.unit, "utf8")
+          .replace("<string>linear-t3.project-1</string>", "<string>linear-t3</string>")
+          .replaceAll(files.log, join(home.XDG_STATE_HOME, "linear-t3", "daemon.log"))
+          .replace(pinned ? "" : "\t\t<string>--project=project-1</string>\n", "");
+        rmSync(files.unit);
+        writeFile(join(home.HOME, "Library", "LaunchAgents", "linear-t3.plist"), agent);
+      },
+      started: (project: string) =>
+        recorded().includes(
+          `bootstrap gui/${uid} ${join(home.HOME, "Library", "LaunchAgents", `linear-t3.${project}.plist`)}`,
+        ),
     };
   }
 
@@ -3235,6 +3359,22 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
       unitOf: (project: string) =>
         join(home.XDG_CONFIG_HOME, "systemd", "user", `linear-t3-${project}.service`),
       unitName: (project: string) => `linear-t3-${project}.service`,
+      legacyUnit: join(home.XDG_CONFIG_HOME, "systemd", "user", "linear-t3.service"),
+      makeLegacy(pinned: boolean) {
+        const unit = readFileSync(files.unit, "utf8")
+          .replace(
+            "Description=linear-t3 Daemon for T3 project project-1",
+            "Description=linear-t3 Daemon",
+          )
+          .replace(pinned ? "" : '"--project=project-1" ', "");
+        rmSync(files.unit);
+        writeFile(join(home.XDG_CONFIG_HOME, "systemd", "user", "linear-t3.service"), unit);
+      },
+      started: (project: string) =>
+        existsSync(calls) &&
+        readFileSync(calls, "utf8").includes(
+          `systemctl --user restart linear-t3-${project}.service`,
+        ),
     };
   }
 

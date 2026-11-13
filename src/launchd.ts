@@ -3,10 +3,10 @@ import { dirname, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import type { Paths } from "./paths.ts";
 import {
-  type ServiceManager,
   type ServicePlatform,
   ServiceError,
   type Unit,
+  type UnitManager,
   checkUnitId,
   elapsed,
   listUnits,
@@ -16,6 +16,8 @@ import {
 
 /** Each Daemon's label is this, a dot and its T3 project's id. */
 const LABEL_PREFIX = "linear-t3.";
+/** The label of the single agent from before each T3 project had its own Daemon. */
+const LEGACY_LABEL = "linear-t3";
 const AGENT_FILE = /^linear-t3\.(.+)\.plist$/;
 // Seconds launchd waits before restarting a crashed Daemon, and after SIGTERM before SIGKILL.
 const RESTART_DELAY = 10;
@@ -104,17 +106,26 @@ export function launchd(paths: Paths): ServicePlatform {
   const agentPath = (project: string) =>
     join(paths.launchAgents, `${LABEL_PREFIX}${project}.plist`);
   return {
-    daemon: (project) => agent(paths, checkUnitId(project), agentPath(project)),
+    daemon(project) {
+      checkUnitId(project);
+      // Each Daemon writes its own log, so `logs` shows one project's output.
+      const log = join(paths.logs, `daemon-${project}.log`);
+      return { project, ...agent(`${LABEL_PREFIX}${project}`, agentPath(project), log) };
+    },
     list: () => listUnits(paths.launchAgents, AGENT_FILE, readAgent),
+    legacy: () =>
+      agent(
+        LEGACY_LABEL,
+        join(paths.launchAgents, `${LEGACY_LABEL}.plist`),
+        join(paths.logs, "daemon.log"),
+      ),
   };
 }
 
-/** The Daemon of T3 project `project`, as the launchd agent at `agentPath`. */
-function agent(paths: Paths, project: string, agentPath: string): ServiceManager {
+/** The launchd agent labeled `label` at `agentPath`, logging to `log`. */
+function agent(label: string, agentPath: string, log: string): UnitManager {
   const domain = `gui/${process.getuid!()}`;
-  const target = `${domain}/${LABEL_PREFIX}${project}`;
-  // Each Daemon writes its own log, so `logs` shows one project's output.
-  const log = join(paths.logs, `daemon-${project}.log`);
+  const target = `${domain}/${label}`;
   const loaded = async () => (await launchctl("print", target)).ok;
   const unload = async () => {
     if (await loaded()) await mustLaunchctl("bootout", target);
@@ -132,20 +143,21 @@ function agent(paths: Paths, project: string, agentPath: string): ServiceManager
   };
 
   return {
-    project,
     kind: "launchd agent",
     unitPath: agentPath,
     logLocation: log,
     installed: () => existsSync(agentPath),
     pinned: () => (existsSync(agentPath) ? readAgent(agentPath) : undefined),
 
-    async install(unit) {
+    async install(unit, start = true) {
       // launchd only rereads the agent when it loads it, so unload the old one first.
       await unload();
       mkdirSync(dirname(agentPath), { recursive: true });
       mkdirSync(dirname(log), { recursive: true });
-      writeFileSync(agentPath, plist(`${LABEL_PREFIX}${project}`, unit, log));
-      await load();
+      writeFileSync(agentPath, plist(label, unit, log));
+      // Disabled and unloaded, the way `stop` leaves it.
+      if (start) await load();
+      else await mustLaunchctl("disable", target);
     },
     async stop() {
       await unload();

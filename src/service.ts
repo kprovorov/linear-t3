@@ -24,10 +24,8 @@ export interface ServiceStatus {
   hint?: string;
 }
 
-/** The OS service manager that keeps one T3 project's Daemon running in the background. See ADR 0001 and 0004. */
-export interface ServiceManager {
-  /** The T3 project's id, which names the unit. */
-  project: string;
+/** The OS service manager for one unit that runs a Daemon in the background. See ADR 0001. */
+export interface UnitManager {
   /** What the unit is called in messages, e.g. `launchd agent`. */
   kind: string;
   /** The unit file, e.g. the launchd agent. */
@@ -37,8 +35,11 @@ export interface ServiceManager {
   installed(): boolean;
   /** What the installed unit runs, read back from it. */
   pinned(): Unit | undefined;
-  /** Writes or refreshes the unit, then enables and starts it. */
-  install(unit: Unit): Promise<void>;
+  /**
+   * Writes or refreshes the unit, then enables and starts it. With `start` false, it's left stopped
+   * and won't start at login, as after `stop`.
+   */
+  install(unit: Unit, start?: boolean): Promise<void>;
   /** Stops the Daemon and keeps it from starting at login. */
   stop(): Promise<void>;
   restart(): Promise<void>;
@@ -47,6 +48,12 @@ export interface ServiceManager {
   logs(follow: boolean): Promise<number>;
   /** Stops the Daemon and removes the unit. */
   uninstall(): Promise<void>;
+}
+
+/** The OS service manager that keeps one T3 project's Daemon running in the background. See ADR 0004. */
+export interface ServiceManager extends UnitManager {
+  /** The T3 project's id, which names the unit. */
+  project: string;
 }
 
 /** A background Daemon whose unit is installed. */
@@ -63,6 +70,8 @@ export interface ServicePlatform {
   daemon(project: string): ServiceManager;
   /** Every installed Daemon, found by its unit's name, in project id order. */
   list(): InstalledDaemon[];
+  /** The single background service from before each T3 project had its own Daemon. */
+  legacy(): UnitManager;
 }
 
 /** A failure to report to the user as-is. */
@@ -117,6 +126,32 @@ export function servicePlatform(paths: Paths): ServicePlatform {
 // The Daemon reads these to find its files, so the service gets them when `start` had them. The
 // Global Config is always pinned, as an absolute path.
 const PASSED_ENV = ["T3CODE_HOME", "LINEAR_T3_CONFIG", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+
+/**
+ * Moves the single background service from before per-project Daemons to its project's Daemon:
+ * same program and environment, running only if it was. One pinned to no project, from 0.2, is
+ * removed. Resolves with what to tell the user, or `undefined` when there was nothing to move.
+ */
+export async function migrateLegacy(platform: ServicePlatform): Promise<string | undefined> {
+  const old = platform.legacy();
+  const unit = old.pinned();
+  if (!unit) return undefined;
+  const { project } = pinnedTo(unit);
+  if (project === undefined) {
+    await old.uninstall();
+    return `Removed the old background service (${old.unitPath}), which watched no T3 project; run \`linear-t3 start\` in the repository it should watch`;
+  }
+  const manager = platform.daemon(project);
+  if (manager.installed()) {
+    await old.uninstall();
+    return `Removed the old background service (${old.unitPath}); T3 project ${project} already has its Daemon (${manager.unitPath})`;
+  }
+  const { running } = await old.status();
+  // Remove the old one first, so the two never run at once.
+  await old.uninstall();
+  await manager.install(unit, running);
+  return `Moved the old background service (${old.unitPath}) to the Daemon for T3 project ${project} (${manager.unitPath})${running ? "" : ", left stopped"}`;
+}
 
 /** What `start` pins the Daemon to, so it runs the same from any working directory. */
 export interface Pinned {

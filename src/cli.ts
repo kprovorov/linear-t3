@@ -20,7 +20,14 @@ import { LOCAL_CONFIG_NAME, loadGlobalConfig } from "./config.ts";
 import { configFlags, configOptions } from "./flags.ts";
 import { resolvePaths } from "./paths.ts";
 import { preflight } from "./preflight.ts";
-import { ServiceError, daemonUnit, pinnedTo, servicePlatform } from "./service.ts";
+import {
+  type ServicePlatform,
+  ServiceError,
+  daemonUnit,
+  migrateLegacy,
+  pinnedTo,
+  servicePlatform,
+} from "./service.ts";
 import { type TargetOptions, describeProject, pickDaemon } from "./target.ts";
 import { checkLinear } from "./token-check.ts";
 
@@ -179,6 +186,12 @@ async function exitOnServiceError(work: () => Promise<void>): Promise<void> {
 
 const cliPath = fileURLToPath(import.meta.url);
 
+/** Moves the old single background service to its project's Daemon, saying what it did. */
+async function migrate(platform: ServicePlatform): Promise<void> {
+  const done = await migrateLegacy(platform);
+  if (done) console.log(done);
+}
+
 async function start(
   options: { config?: string | false } & Record<string, unknown>,
 ): Promise<void> {
@@ -190,6 +203,7 @@ async function start(
       "linear-t3 is running from the npx cache, which npm may clean up. Install it first with `npm i -g linear-t3`, then run `linear-t3 start`",
     );
   }
+  await migrate(platform);
   const flags = configFlags(options);
   const { problems, localConfig, project } = await preflight(where, {
     localConfig: options.config,
@@ -246,6 +260,7 @@ async function uninstall(options: TargetOptions): Promise<void> {
 async function status(options: TargetOptions): Promise<void> {
   const where = paths();
   const platform = servicePlatform(where);
+  await migrate(platform);
   let daemon = "not installed, run `linear-t3 start`";
   let hint: string | undefined;
   let pinned: ReturnType<typeof pinnedTo> | undefined;
