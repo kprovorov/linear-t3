@@ -10,6 +10,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -742,6 +743,140 @@ describe("cli run against fake Linear and T3", () => {
     ]);
     expect(existsSync(join(dir, "data"))).toBe(false);
     expect(existsSync(files.state)).toBe(false);
+  });
+
+  describe("several Daemons sharing one State", () => {
+    const other = { id: "project-0", title: "other", workspaceRoot: "/work/other" };
+
+    test("two concurrent runs for different projects both keep every record they wrote", async () => {
+      const { dir, env, files } = await servers(
+        // Slow launches, so each run loads State before the other records anything.
+        { projects: [other, project], onLaunch: () => setTimeout(300) },
+        {},
+        [
+          ...issues.map((issue) => ({ ...issue, team: "ENG" })),
+          { id: "ops-1", identifier: "OPS-1", title: "Ops one", team: "OPS" },
+          { id: "ops-2", identifier: "OPS-2", title: "Ops two", team: "OPS" },
+        ],
+        {},
+        { teams: ["ENG", "OPS"] },
+      );
+      const opsDir = repoDir({ project: "other", team: "OPS" });
+      const results = await Promise.all([
+        startCli({ cwd: dir, env }, ["run", "--once"]).result,
+        startCli({ cwd: opsDir, env }, ["run", "--once"]).result,
+      ]);
+      for (const result of results) expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launchedIds(files.state).sort()).toEqual(["issue-1", "issue-2", "ops-1", "ops-2"]);
+      expect(existsSync(`${files.state}.lock`)).toBe(false);
+    });
+
+    // Waits out the 10s minimum poll interval.
+    test("a Daemon skips an issue another Daemon launched since its last poll, without commenting or moving it again", async () => {
+      const queue: FakeIssue[] = [];
+      const { linear, t3, dir, env } = await servers({ projects: [other, project] }, {}, queue, {
+        comment: true,
+        setStatus: "In Progress",
+      });
+      const otherDir = repoDir({ project: "other", comment: true, setStatus: "In Progress" });
+      const daemon = startCli({ cwd: otherDir, env, killAfterMs: 25_000 }, ["run"]);
+      const polls = async (count: number) => {
+        while (linear.filters.length < count) await setTimeout(50);
+      };
+      // The Daemon's first poll finds nothing; then the other run launches ENG-1.
+      await polls(1);
+      queue.push(issues[0]!);
+      const once = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(once).toMatchObject({ status: 0, stderr: "" });
+      expect(t3.launches).toHaveLength(1);
+      await polls(3);
+      await setTimeout(1000);
+      daemon.child.kill("SIGTERM");
+      const result = await daemon.result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).not.toContain("new issue(s)");
+      expect(t3.launches).toHaveLength(1);
+      expect(linear.comments).toHaveLength(1);
+      expect(linear.moves).toEqual([{ id: "issue-1", status: "In Progress" }]);
+    }, 25_000);
+
+    test("a launch that another Daemon recorded first leaves the record and Linear to that Daemon", async () => {
+      const theirs = {
+        identifier: "ENG-1",
+        threadId: "t-theirs",
+        launchedAt: "2026-01-01T00:00:00.000Z",
+        projectId: other.id,
+      };
+      let stateFile = "";
+      const { linear, t3, dir, env, files } = await servers(
+        {
+          projects: [other, project],
+          // The other Daemon records ENG-1 while this one is launching it.
+          onLaunch: async () =>
+            writeFile(stateFile, JSON.stringify({ launched: { "issue-1": theirs } })),
+        },
+        {},
+        [issues[0]!],
+        { comment: true, setStatus: "In Progress" },
+      );
+      stateFile = files.state;
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain("ENG-1: another Daemon already launched it");
+      expect(t3.launches).toHaveLength(1);
+      expect(linear.comments).toEqual([]);
+      expect(linear.moves).toEqual([]);
+      expect(JSON.parse(readFileSync(files.state, "utf8")).launched).toEqual({ "issue-1": theirs });
+    });
+
+    test("pending Linear actions belong to the project whose Daemon recorded them", async () => {
+      const { linear, dir, env, files } = await servers({ projects: [other, project] }, {}, []);
+      const launched = {
+        "issue-1": {
+          identifier: "ENG-1",
+          threadId: "t-1",
+          launchedAt: "2026-01-01T00:00:00.000Z",
+          projectId: other.id,
+          pendingActions: { comment: true },
+        },
+      };
+      writeFile(files.state, JSON.stringify({ launched }));
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(linear.comments).toEqual([]);
+      const state = JSON.parse(readFileSync(files.state, "utf8"));
+      expect(state.launched["issue-1"].pendingActions).toEqual({ comment: true });
+    });
+
+    test("launches record the project they launched into", async () => {
+      const { dir, env, files } = await servers();
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      const state = JSON.parse(readFileSync(files.state, "utf8"));
+      expect(state.launched["issue-1"].projectId).toBe(project.id);
+    });
+
+    test("a stale lock left by a crashed Daemon doesn't block a run", async () => {
+      const { dir, env, files } = await servers();
+      const lock = `${files.state}.lock`;
+      writeFile(lock, "12345");
+      const anHourAgo = new Date(Date.now() - 60 * 60_000);
+      utimesSync(lock, anHourAgo, anHourAgo);
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launchedIds(files.state)).toEqual(["issue-1", "issue-2"]);
+      expect(existsSync(lock)).toBe(false);
+    });
+
+    test("a State file that can't be written stops the Daemon before it launches anything", async () => {
+      const { t3, dir, env, files } = await servers({}, { stateFile: "blocker/state.json" });
+      // A file where the State's directory should be.
+      writeFile(join(dirname(files.config), "blocker"), "");
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("blocker");
+      expect(t3.launches).toEqual([]);
+    });
   });
 
   test("polls the Local Config's team and launches into its T3 project", async () => {
