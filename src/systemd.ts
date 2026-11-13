@@ -2,10 +2,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join } from "node:path";
 import type { Paths } from "./paths.ts";
 import {
-  type ServiceManager,
   type ServicePlatform,
   ServiceError,
   type Unit,
+  type UnitManager,
   checkUnitId,
   elapsed,
   listUnits,
@@ -18,6 +18,8 @@ import {
  * template, because each Daemon runs with its own arguments.
  */
 const NAME_PREFIX = "linear-t3-";
+/** The name of the single unit from before each T3 project had its own Daemon. */
+const LEGACY_NAME = "linear-t3";
 const UNIT_FILE = /^linear-t3-(.+)\.service$/;
 // Seconds systemd waits before restarting a crashed Daemon, and after SIGTERM before SIGKILL.
 const RESTART_DELAY = 10;
@@ -39,12 +41,12 @@ const unquoteWords = (line: string, exec: boolean) =>
       .replace(/\\(.)/g, (_, char: string) => (char === "n" ? "\n" : char)),
   );
 
-function unitFile(project: string, unit: Unit): string {
+function unitFile(description: string, unit: Unit): string {
   const env = Object.entries(unit.env)
     .map(([key, value]) => `Environment=${quoteWord(`${key}=${value}`)}\n`)
     .join("");
   return `[Unit]
-Description=linear-t3 Daemon for T3 project ${project}
+Description=${description}
 
 [Service]
 ExecStart=${unit.program.map(quoteArg).join(" ")}
@@ -95,14 +97,23 @@ export function systemd(paths: Paths): ServicePlatform {
   const unitPath = (project: string) =>
     join(paths.systemdUnits, `${NAME_PREFIX}${project}.service`);
   return {
-    daemon: (project) => userUnit(checkUnitId(project), unitPath(project)),
+    daemon(project) {
+      checkUnitId(project);
+      const unit = userUnit(
+        `${NAME_PREFIX}${project}`,
+        unitPath(project),
+        `linear-t3 Daemon for T3 project ${project}`,
+      );
+      return { project, ...unit };
+    },
     list: () => listUnits(paths.systemdUnits, UNIT_FILE, readUnit),
+    legacy: () =>
+      userUnit(LEGACY_NAME, join(paths.systemdUnits, `${LEGACY_NAME}.service`), "linear-t3 Daemon"),
   };
 }
 
-/** The Daemon of T3 project `project`, as the systemd user unit at `unitPath`. */
-function userUnit(project: string, unitPath: string): ServiceManager {
-  const name = `${NAME_PREFIX}${project}`;
+/** The systemd user unit `name` at `unitPath`. */
+function userUnit(name: string, unitPath: string, description: string): UnitManager {
   const service = `${name}.service`;
   // `stop` disables the unit, so enable it again before starting it.
   const enableAndStart = async () => {
@@ -112,18 +123,18 @@ function userUnit(project: string, unitPath: string): ServiceManager {
   };
 
   return {
-    project,
     kind: "systemd user unit",
     unitPath,
     logLocation: `journalctl --user -u ${name}`,
     installed: () => existsSync(unitPath),
     pinned: () => (existsSync(unitPath) ? readUnit(unitPath) : undefined),
 
-    async install(unit) {
+    async install(unit, start = true) {
       mkdirSync(dirname(unitPath), { recursive: true });
-      writeFileSync(unitPath, unitFile(project, unit));
+      writeFileSync(unitPath, unitFile(description, unit));
       await systemctl("daemon-reload");
-      await enableAndStart();
+      // Left disabled, the way `stop` leaves it.
+      if (start) await enableAndStart();
     },
     async stop() {
       await systemctl("disable", "--now", service);

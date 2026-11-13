@@ -244,6 +244,15 @@ On Linux, systemd stops user services when you log out unless lingering is on. T
 
 Other platforms can still use `run` under their own supervisor.
 
+### Upgrading from one background service
+
+Up to linear-t3 1.1, there was one background service per machine: launchd agent `linear-t3`, or systemd user unit `linear-t3.service`. The next `start` or `status` moves it over, with nothing to do by hand:
+
+- Pinned to a T3 project, it becomes that project's Daemon, with the same program and environment. It keeps running if it was running and stays stopped if it was stopped. If the project already has a Daemon, the old service is just removed.
+- Pinned to no project, as 0.2 installed it, it's removed, and you're told to run `start` again in the repository it should watch.
+
+When `start` moves it, it then installs the Daemon it was asked for, so you end up with one Daemon for the project. On macOS the old `daemon.log` is kept; the Daemon logs to `daemon-<project id>.log` from then on.
+
 ## Files
 
 linear-t3 keeps its files in [XDG](https://specifications.freedesktop.org/basedir-spec/latest/) locations:
@@ -265,7 +274,7 @@ Up to linear-t3 0.2, one Global Config listed every project under `projects`, wi
 
 - **One Global Config** with the machine settings (`t3Url`, `maxRunningThreads`, `stateFile`) and anything every run shares from `defaults`.
 - **One Local Config per project**: a `linear-t3.config.json` in each repository, holding that entry's `project`, `team`, filters and any other settings it overrode. Keep a project's former key as `project`, or drop it and run from inside the repository.
-- **One background service, for one project**: run `linear-t3 start` again in the repository it should watch. A service installed by 0.2 passes its Config as `--config`, which now names a Local Config, so it stops working until you do. To watch other projects in the background too, run `linear-t3 start` in each of their repositories; each gets its own Daemon.
+- **One background service, for one project**: a service installed by 0.2 is pinned to no project, so the next `linear-t3 start` or `linear-t3 status` removes it and tells you to run `linear-t3 start` again in the repository it should watch. To watch other projects in the background too, run `linear-t3 start` in each of their repositories; each gets its own Daemon.
 
 Old keys and their replacements:
 
