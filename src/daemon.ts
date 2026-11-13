@@ -481,7 +481,8 @@ function failLaunch(issue: Issue, error: unknown): void {
 
 async function poll(
   config: Config,
-  project: T3Project,
+  // The T3 project as last found in T3; launchCandidates refreshes it.
+  watched: { project: T3Project },
   filter: IssueFilter,
   linear: LinearClient,
   state: StateStore,
@@ -492,7 +493,7 @@ async function poll(
   await state.load();
   if (!dryRun) {
     // Another project's Daemon retries the actions it recorded.
-    for (const [issueId, record] of state.withPendingActions(project.id)) {
+    for (const [issueId, record] of state.withPendingActions(watched.project.id)) {
       if (shutdown.signal.aborted) return;
       await runPendingActions(issueId, record, { config, linear, state });
     }
@@ -506,7 +507,7 @@ async function poll(
       `${candidates.length} new issue(s): ${candidates.map((issue) => issue.identifier).join(", ")}`,
     );
   if (shutdown.signal.aborted) return;
-  await launchCandidates(candidates, { config, linear, state, t3Token, dryRun });
+  await launchCandidates(candidates, { config, watched, linear, state, t3Token, dryRun });
 }
 
 // Linear priority runs 1 (Urgent) to 4 (Low); 0 is "No priority" and goes after Low.
@@ -543,13 +544,14 @@ async function launchCandidates(
   candidates: Issue[],
   ctx: {
     config: Config;
+    watched: { project: T3Project };
     linear: LinearClient;
     state: StateStore;
     t3Token: string;
     dryRun: boolean;
   },
 ): Promise<void> {
-  const { config, linear, state, t3Token, dryRun } = ctx;
+  const { config, watched, linear, state, t3Token, dryRun } = ctx;
   const t3 = await T3Client.connect(config.t3Url, t3Token, shutdown.signal);
   try {
     const { projects, threads } = await readShell(t3);
@@ -562,6 +564,8 @@ async function launchCandidates(
     // Matched again each poll, so a project re-added in T3 is picked up. One gone since the run
     // started fails the poll, even when nothing has room.
     const project = findProject(projects, config);
+    // Pending actions of launches into it are retried by its new id.
+    watched.project = project;
     // Keep going past failures, so one can't block later candidates.
     for (const issue of candidates) {
       if (shutdown.signal.aborted) break;
@@ -678,9 +682,10 @@ export async function runDaemon({
     }
   }
   log(`watching ${config.team} -> ${project.title}`);
+  const watched = { project };
   while (!shutdown.signal.aborted) {
     try {
-      await poll(config, project, filter, linear, state, t3Token, dryRun);
+      await poll(config, watched, filter, linear, state, t3Token, dryRun);
     } catch (error) {
       if (error instanceof StateWriteError) throw error;
       log(`poll failed: ${(error as Error).message}`);

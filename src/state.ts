@@ -141,13 +141,34 @@ export class StateStore {
     if (holder === token) await unlink(this.lockPath).catch(() => {});
   }
 
-  /** Removes the lock if a Daemon that died left it behind. */
+  /**
+   * Removes the lock if a Daemon that died left it behind. Several Daemons may find the same stale
+   * lock, so removal happens under a second lock, and the lock is checked again under it: one that
+   * another Daemon just replaced is fresh, and stays.
+   */
   private async removeIfStale(): Promise<boolean> {
+    if (!(await this.isStale(this.lockPath))) return false;
+    const breakPath = `${this.lockPath}.break`;
     try {
-      const { mtimeMs } = await stat(this.lockPath);
-      if (Date.now() - mtimeMs < STALE_LOCK_MS) return false;
-      await unlink(this.lockPath);
+      await (await open(breakPath, "wx")).close();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      // A Daemon that died while removing a stale lock left this behind.
+      if (await this.isStale(breakPath)) await unlink(breakPath).catch(() => {});
+      return false;
+    }
+    try {
+      if (await this.isStale(this.lockPath)) await unlink(this.lockPath).catch(() => {});
       return true;
+    } finally {
+      await unlink(breakPath).catch(() => {});
+    }
+  }
+
+  /** Whether the file at `path` is older than a live lock can be; a missing one counts. */
+  private async isStale(path: string): Promise<boolean> {
+    try {
+      return Date.now() - (await stat(path)).mtimeMs >= STALE_LOCK_MS;
     } catch (error) {
       // Released between our attempt and now: try again straight away.
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
