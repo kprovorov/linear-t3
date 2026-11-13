@@ -336,9 +336,10 @@ async function recordOrStop(
   state: StateStore,
   issueId: string,
   record: LaunchRecord,
-): Promise<void> {
+  options?: { ifAbsent?: boolean },
+): Promise<boolean> {
   try {
-    await state.record(issueId, record);
+    return await state.record(issueId, record, options);
   } catch (error) {
     throw new StateWriteError(
       `${record.identifier}: could not record thread ${record.threadId}: ${(error as Error).message}`,
@@ -406,12 +407,17 @@ async function launchIssue(
     identifier: issue.identifier,
     threadId,
     launchedAt: new Date().toISOString(),
+    projectId: project.id,
     pendingActions: {
       ...(config.comment && { comment: true }),
       ...(config.setStatus && { moveToState: config.setStatus }),
     },
   };
-  await recordOrStop(state, issue.id, record);
+  // Another Daemon may have launched it since this poll read State; its Daemon updates Linear.
+  if (!(await recordOrStop(state, issue.id, record, { ifAbsent: true }))) {
+    log(`${issue.identifier}: another Daemon already launched it, leaving it to that Daemon`);
+    return;
+  }
   log(
     `${issue.identifier}: ${resumed ? "found existing" : "started"} T3 thread ${threadId} in "${project.title}"`,
   );
@@ -475,14 +481,19 @@ function failLaunch(issue: Issue, error: unknown): void {
 
 async function poll(
   config: Config,
+  // The T3 project as last found in T3; launchCandidates refreshes it.
+  watched: { project: T3Project },
   filter: IssueFilter,
   linear: LinearClient,
   state: StateStore,
   t3Token: string,
   dryRun: boolean,
 ) {
+  // Other Daemons share the State: pick up the issues they launched since the last poll.
+  await state.load();
   if (!dryRun) {
-    for (const [issueId, record] of state.withPendingActions()) {
+    // Another project's Daemon retries the actions it recorded.
+    for (const [issueId, record] of state.withPendingActions(watched.project.id)) {
       if (shutdown.signal.aborted) return;
       await runPendingActions(issueId, record, { config, linear, state });
     }
@@ -496,7 +507,7 @@ async function poll(
       `${candidates.length} new issue(s): ${candidates.map((issue) => issue.identifier).join(", ")}`,
     );
   if (shutdown.signal.aborted) return;
-  await launchCandidates(candidates, { config, linear, state, t3Token, dryRun });
+  await launchCandidates(candidates, { config, watched, linear, state, t3Token, dryRun });
 }
 
 // Linear priority runs 1 (Urgent) to 4 (Low); 0 is "No priority" and goes after Low.
@@ -533,13 +544,14 @@ async function launchCandidates(
   candidates: Issue[],
   ctx: {
     config: Config;
+    watched: { project: T3Project };
     linear: LinearClient;
     state: StateStore;
     t3Token: string;
     dryRun: boolean;
   },
 ): Promise<void> {
-  const { config, linear, state, t3Token, dryRun } = ctx;
+  const { config, watched, linear, state, t3Token, dryRun } = ctx;
   const t3 = await T3Client.connect(config.t3Url, t3Token, shutdown.signal);
   try {
     const { projects, threads } = await readShell(t3);
@@ -552,6 +564,8 @@ async function launchCandidates(
     // Matched again each poll, so a project re-added in T3 is picked up. One gone since the run
     // started fails the poll, even when nothing has room.
     const project = findProject(projects, config);
+    // Pending actions of launches into it are retried by its new id.
+    watched.project = project;
     // Keep going past failures, so one can't block later candidates.
     for (const issue of candidates) {
       if (shutdown.signal.aborted) break;
@@ -654,8 +668,8 @@ export async function runDaemon({
   }
   const { config, project, filter } = prepared;
   const state = new StateStore(config.stateFile);
-  // A dry run launches nothing, so it never writes State.
-  await state.load({ checkWritable: !dryRun });
+  // Each poll reads State. A dry run launches nothing, so it never writes State.
+  if (!dryRun) await state.load({ checkWritable: true });
 
   if (dryRun) {
     for (const key of Object.keys(T3_SETTINGS) as (keyof typeof T3_SETTINGS)[]) {
@@ -668,9 +682,10 @@ export async function runDaemon({
     }
   }
   log(`watching ${config.team} -> ${project.title}`);
+  const watched = { project };
   while (!shutdown.signal.aborted) {
     try {
-      await poll(config, filter, linear, state, t3Token, dryRun);
+      await poll(config, watched, filter, linear, state, t3Token, dryRun);
     } catch (error) {
       if (error instanceof StateWriteError) throw error;
       log(`poll failed: ${(error as Error).message}`);

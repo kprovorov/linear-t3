@@ -137,7 +137,7 @@ The nearest `linear-t3.config.json` from the working directory up to the Git roo
 }
 ```
 
-`--config <file>` uses another file instead, so you can keep several, such as `linear-t3.bugs.json` and `linear-t3.features.json`. Nothing coordinates several runs on one machine yet: they share the State file and each checks `maxRunningThreads` on its own, so run one at a time. A missing discovered file is fine, but a missing `--config` file is an error.
+`--config <file>` uses another file instead, so you can keep several, such as `linear-t3.bugs.json` and `linear-t3.features.json`. Several runs on one machine, background or foreground, can share the State file safely: each sees the issues the others launched and skips them. A missing discovered file is fine, but a missing `--config` file is an error.
 
 ### Config keys
 
@@ -182,9 +182,9 @@ What each one does:
 - **`startFromOrigin`**: branch new worktrees from the remote's `baseRef`.
 - **`prompt`**: the first message of each thread. `{identifier}`, `{title}`, `{url}`, `{description}` and `{branchName}` are filled in, so `--prompt '/implement {identifier}'` works.
 - **`pollInterval`**: seconds between polls of Linear, at least 10.
-- **`maxRunningThreads`**: the most [Running threads](CONTEXT.md) T3 may have, counting threads you started by hand, before launches wait. Unset means no cap, and `0` pauses launches. Waiting issues start on a later poll.
+- **`maxRunningThreads`**: the most [Running threads](CONTEXT.md) T3 may have, counting threads you started by hand, before launches wait. Unset means no cap, and `0` pauses launches. Waiting issues start on a later poll. The cap is soft across Daemons: each counts the same Running threads, but two that poll at the same moment can both see room and go over the cap by a thread or two until the next poll.
 - **`t3Url`**: the T3 Code server.
-- **`stateFile`**: where State is kept, relative to the Global Config's folder.
+- **`stateFile`**: where State is kept, relative to the Global Config's folder. Every Daemon on the machine can share it: each write takes a lock (`<stateFile>.lock`) and merges its record into the file, and each Daemon rereads it every poll.
 
 Status, label and `setStatus` names are checked against the team before the first poll, including the `In Progress` default, so a typo fails fast instead of matching nothing.
 
