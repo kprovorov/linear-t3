@@ -33,20 +33,25 @@ const fixThenStart = (error: unknown) =>
 // How long to wait for T3's projects once connected.
 const SHELL_TIMEOUT_MS = 30_000;
 
-/** The T3 project `config` names, or infers from its folder, as T3 reports it now. */
-async function resolveProject(config: Config, t3Token: string): Promise<T3Project> {
-  const t3 = await T3Client.connect(config.t3Url, t3Token, new AbortController().signal);
+/** The projects T3 at `t3Url` has now. */
+export async function t3Projects(t3Url: string, t3Token: string): Promise<T3Project[]> {
+  const t3 = await T3Client.connect(t3Url, t3Token, new AbortController().signal);
   // Closing the socket ends a wait for a snapshot that never comes.
   const timer = setTimeout(() => t3.close(), SHELL_TIMEOUT_MS);
   try {
     const shell = await t3.readShell().catch((error: unknown) => {
-      throw new Error(`T3 at ${config.t3Url} didn't list its projects: ${message(error)}`);
+      throw new Error(`T3 at ${t3Url} didn't list its projects: ${message(error)}`);
     });
-    return findProject(shell.projects, config);
+    return shell.projects;
   } finally {
     clearTimeout(timer);
     t3.close();
   }
+}
+
+/** The T3 project `config` names, or infers from its folder, as T3 reports it now. */
+async function resolveProject(config: Config, t3Token: string): Promise<T3Project> {
+  return findProject(await t3Projects(config.t3Url, t3Token), config);
 }
 
 /**

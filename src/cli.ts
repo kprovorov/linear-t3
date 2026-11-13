@@ -20,7 +20,8 @@ import { LOCAL_CONFIG_NAME, loadGlobalConfig } from "./config.ts";
 import { configFlags, configOptions } from "./flags.ts";
 import { resolvePaths } from "./paths.ts";
 import { preflight } from "./preflight.ts";
-import { ServiceError, daemonUnit, pinnedTo, serviceManager } from "./service.ts";
+import { ServiceError, daemonUnit, pinnedTo, servicePlatform } from "./service.ts";
+import { type TargetOptions, describeProject, pickDaemon } from "./target.ts";
 import { checkLinear } from "./token-check.ts";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -182,7 +183,7 @@ async function start(
   options: { config?: string | false } & Record<string, unknown>,
 ): Promise<void> {
   const where = paths();
-  const manager = serviceManager(where);
+  const platform = servicePlatform(where);
   // npm can clean the npx cache at any time, which would leave the service pointing at nothing.
   if ([process.argv[1], cliPath].some((path) => path?.split(sep).includes("_npx"))) {
     throw new ServiceError(
@@ -199,6 +200,8 @@ async function start(
       ["The Daemon would not start, so it wasn't installed:", ...problems].join("\n"),
     );
   }
+  // Each T3 project has its own Daemon, so this replaces only this project's.
+  const manager = platform.daemon(project.id);
   await manager.install(
     daemonUnit(cliPath, {
       project: project.id,
@@ -210,46 +213,47 @@ async function start(
   console.log(
     [
       `Started the Daemon (${manager.kind} ${manager.unitPath})`,
-      `Pinned to T3 project "${project.title}" (${project.id})`,
+      `Pinned to T3 project ${describeProject(project.id, project.title)}`,
     ].join("\n"),
   );
 }
 
-/** The service manager, once `start` has installed the Daemon. */
-function installedService() {
-  const manager = serviceManager(paths());
-  if (!manager.installed()) {
-    throw new ServiceError(
-      "The Daemon isn't installed as a background service; run `linear-t3 start`",
-    );
-  }
-  return manager;
+/** The installed Daemon the command's flags and working directory pick. */
+const target = (options: TargetOptions) => pickDaemon(servicePlatform(paths()), paths(), options);
+
+async function stop(options: TargetOptions): Promise<void> {
+  const { manager, title } = await target(options);
+  await manager.stop();
+  console.log(
+    `Stopped the Daemon for ${describeProject(manager.project, title)}; it won't start at login until \`linear-t3 start\``,
+  );
 }
 
-async function stop(): Promise<void> {
-  await installedService().stop();
-  console.log("Stopped the Daemon; it won't start at login until `linear-t3 start`");
+async function restart(options: TargetOptions): Promise<void> {
+  const { manager, title } = await target(options);
+  await manager.restart();
+  console.log(`Restarted the Daemon for ${describeProject(manager.project, title)}`);
 }
 
-async function restart(): Promise<void> {
-  await installedService().restart();
-  console.log("Restarted the Daemon");
-}
-
-async function uninstall(): Promise<void> {
-  const manager = installedService();
+async function uninstall(options: TargetOptions): Promise<void> {
+  const { manager, title } = await target(options);
   await manager.uninstall();
-  console.log(`Removed ${manager.unitPath}; the Config, Credentials and State are kept`);
+  console.log(
+    `Removed the Daemon for ${describeProject(manager.project, title)} (${manager.unitPath}); the Config, Credentials, State and log are kept`,
+  );
 }
 
-async function status(): Promise<void> {
+async function status(options: TargetOptions): Promise<void> {
   const where = paths();
-  const manager = serviceManager(where);
+  const platform = servicePlatform(where);
   let daemon = "not installed, run `linear-t3 start`";
   let hint: string | undefined;
   let pinned: ReturnType<typeof pinnedTo> | undefined;
-  const unit = manager.installed() ? manager.pinned() : undefined;
-  if (unit) {
+  let found: Awaited<ReturnType<typeof target>> | undefined;
+  if (platform.list().length > 0) found = await pickDaemon(platform, where, options);
+  const manager = found?.manager;
+  const unit = manager?.pinned();
+  if (manager && unit) {
     const service = await manager.status();
     const { running, pid, uptime } = service;
     hint = service.hint;
@@ -268,8 +272,8 @@ async function status(): Promise<void> {
     (config) => config.stateFile ?? where.defaultState,
     () => where.defaultState,
   );
-  // The pinned rows only exist once installed. Units from before projects were pinned have none.
-  const project = pinned && (pinned.project ?? "not pinned, run `linear-t3 start` again");
+  // The Daemon's rows only exist once installed.
+  const project = manager && describeProject(manager.project, found?.title);
   const localConfig = pinned && (pinned.localConfig ?? "none");
   const lines: [string, string | undefined][] = [
     ["Daemon", daemon],
@@ -278,8 +282,8 @@ async function status(): Promise<void> {
     ["Local Config", localConfig],
     ["Credentials", where.credentials],
     ["State", state],
-    ["Log", manager.logLocation],
-    ["Unit", manager.unitPath],
+    ["Log", manager?.logLocation],
+    ["Unit", manager?.unitPath],
   ];
   console.log(
     [
@@ -291,8 +295,9 @@ async function status(): Promise<void> {
   );
 }
 
-async function logs({ follow = false }): Promise<void> {
-  process.exitCode = await installedService().logs(follow);
+async function logs({ follow = false, ...options }: TargetOptions & { follow?: boolean }) {
+  const { manager } = await target(options);
+  process.exitCode = await manager.logs(follow);
 }
 
 const program = new Command("linear-t3").version(pkg.version).action(() => program.help());
@@ -350,34 +355,43 @@ const startCommand = program
   );
 for (const option of configOptions()) startCommand.addOption(option);
 
-program
-  .command("stop")
-  .description("stop the Daemon and keep it from starting at login")
-  .action(() => exitOnServiceError(stop));
+const PROJECT_OPTION = [
+  "--project <project>",
+  "the T3 project whose Daemon to act on: its id, unique title or folder path (default: the Local Config's project, else the repository's, else the only installed Daemon)",
+] as const;
 
-program
-  .command("restart")
-  .description(
-    "restart the Daemon with what `start` pinned, e.g. to pick up Config file changes; the project and flags stay pinned until `start` again",
-  )
-  .action(() => exitOnServiceError(restart));
+/** A command that acts on one installed Daemon, picked the way `start` picks the project. */
+function daemonCommand(name: string, description: string) {
+  return program
+    .command(name)
+    .description(description)
+    .option(...PROJECT_OPTION)
+    .option(...CONFIG_OPTION)
+    .option(...NO_CONFIG_OPTION);
+}
 
-program
-  .command("status")
-  .description("show whether the Daemon is running and where its files are")
-  .action(() => exitOnServiceError(status));
+daemonCommand("stop", "stop the Daemon and keep it from starting at login").action(
+  (options: TargetOptions) => exitOnServiceError(() => stop(options)),
+);
 
-program
-  .command("logs")
-  .description("show the Daemon's recent output")
+daemonCommand(
+  "restart",
+  "restart the Daemon with what `start` pinned, e.g. to pick up Config file changes; the project and flags stay pinned until `start` again",
+).action((options: TargetOptions) => exitOnServiceError(() => restart(options)));
+
+daemonCommand("status", "show whether the Daemon is running and where its files are").action(
+  (options: TargetOptions) => exitOnServiceError(() => status(options)),
+);
+
+daemonCommand("logs", "show the Daemon's recent output")
   .option("-f, --follow", "keep printing new output")
-  .action((options: { follow?: boolean }) => exitOnServiceError(() => logs(options)));
+  .action((options: TargetOptions & { follow?: boolean }) =>
+    exitOnServiceError(() => logs(options)),
+  );
 
-program
-  .command("uninstall")
-  .description(
-    "stop the Daemon and remove the background service; keeps Config, Credentials and State",
-  )
-  .action(() => exitOnServiceError(uninstall));
+daemonCommand(
+  "uninstall",
+  "stop the Daemon and remove its background service; keeps the Config, Credentials, State and log",
+).action((options: TargetOptions) => exitOnServiceError(() => uninstall(options)));
 
 await program.parseAsync();

@@ -27,12 +27,12 @@ export interface Paths {
   credentials: string;
   /** Where State goes when the Config doesn't set `stateFile`. */
   defaultState: string;
-  /** The background service's log file, on platforms where it doesn't log to a journal. */
-  log: string;
-  /** The launchd agent that runs the Daemon on macOS. */
-  launchAgent: string;
-  /** The systemd user unit that runs the Daemon on Linux. */
-  systemdUnit: string;
+  /** Where each background Daemon's log file goes, on platforms where it doesn't log to a journal. */
+  logs: string;
+  /** Where the launchd agents that run the Daemons go on macOS. */
+  launchAgents: string;
+  /** Where the systemd user units that run the Daemons go on Linux. */
+  systemdUnits: string;
 }
 
 export function resolvePaths(env: Env = process.env): Paths {
@@ -40,8 +40,8 @@ export function resolvePaths(env: Env = process.env): Paths {
     globalConfig: resolve(env.LINEAR_T3_CONFIG || join(configDir(env), "config.json")),
     credentials: join(configDir(env), "credentials"),
     defaultState: join(stateDir(env), "state.json"),
-    log: join(stateDir(env), "daemon.log"),
-    launchAgent: join(home(env), "Library", "LaunchAgents", `${APP}.plist`),
-    systemdUnit: join(xdgConfig(env), "systemd", "user", `${APP}.service`),
+    logs: stateDir(env),
+    launchAgents: join(home(env), "Library", "LaunchAgents"),
+    systemdUnits: join(xdgConfig(env), "systemd", "user"),
   };
 }

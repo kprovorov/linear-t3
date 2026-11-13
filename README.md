@@ -36,17 +36,17 @@ To keep the team and filters with the repository, put them in a [Local Config](#
 
 ## Commands
 
-| Command                | What it does                                                                                                                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `setup`                | Writes a minimal [Global Config](#global-config) from `config.template.json`, creating its directory. Never overwrites an existing one.                                         |
-| `connect [t3\|linear]` | Gets, checks and saves the T3 token and the Linear API key in the Credentials file. Without an argument it does both, T3 first. Interactive, so run it in a terminal.           |
-| `run`                  | Runs the Daemon in the foreground until SIGINT or SIGTERM. Takes a flag for every [Config key](#config-keys); see [`run`](#run).                                                |
-| `start`                | Takes the same flags as `run`, checks the Config and both tokens, then installs and starts the Daemon as a background service pinned to one T3 project. Run it again to change. |
-| `stop`                 | Stops the Daemon and keeps it from starting at login until the next `start`.                                                                                                    |
-| `restart`              | Restarts the Daemon with what `start` pinned, for example to pick up Config file changes.                                                                                       |
-| `status`               | Shows whether the Daemon is running, the pinned project, and where the Config files, Credentials, State, log and unit are.                                                      |
-| `logs [-f]`            | Shows the Daemon's recent output. `-f` (`--follow`) keeps printing new output.                                                                                                  |
-| `uninstall`            | Stops the Daemon and removes the background service. The Config, Credentials and State are kept.                                                                                |
+| Command                | What it does                                                                                                                                                                     |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setup`                | Writes a minimal [Global Config](#global-config) from `config.template.json`, creating its directory. Never overwrites an existing one.                                          |
+| `connect [t3\|linear]` | Gets, checks and saves the T3 token and the Linear API key in the Credentials file. Without an argument it does both, T3 first. Interactive, so run it in a terminal.            |
+| `run`                  | Runs the Daemon in the foreground until SIGINT or SIGTERM. Takes a flag for every [Config key](#config-keys); see [`run`](#run).                                                 |
+| `start`                | Takes the same flags as `run`, checks the Config and both tokens, then installs and starts a background Daemon for the T3 project. Run it again to change that project's Daemon. |
+| `stop`                 | Stops a project's Daemon and keeps it from starting at login until the next `start`.                                                                                             |
+| `restart`              | Restarts a project's Daemon with what `start` pinned, for example to pick up Config file changes.                                                                                |
+| `status`               | Shows whether a project's Daemon is running, its project, and where the Config files, Credentials, State, log and unit are.                                                      |
+| `logs [-f]`            | Shows a project's Daemon's recent output. `-f` (`--follow`) keeps printing new output.                                                                                           |
+| `uninstall`            | Stops a project's Daemon and removes its background service. The Config, Credentials, State and log are kept.                                                                    |
 
 ### `connect`
 
@@ -211,19 +211,30 @@ Threads always start in T3's default interaction mode.
 
 ## Background service
 
-`start` takes the same flags as `run`. It resolves the T3 project, then installs the Daemon with the OS service manager, which restarts it if it crashes and starts it at login:
+`start` takes the same flags as `run`. It resolves the T3 project, then installs a Daemon for it with the OS service manager, which restarts it if it crashes and starts it at login:
 
-- macOS: a launchd agent, logging to a file.
-- Linux: a systemd user unit, logging to the user journal.
+- macOS: a launchd agent labeled `linear-t3.<project id>`, logging to its own file.
+- Linux: a systemd user unit `linear-t3-<project id>.service`, logging to the user journal.
 
-The service is pinned to one project. `start` saves the project's id, the flags you passed, the absolute path of the Local Config (if any) and the Global Config location into the unit, so it doesn't depend on the directory you ran `start` from:
+Each T3 project gets its own background Daemon. `start` in a second repository adds a Daemon and leaves the first one running; `start` again in a repository replaces only that project's Daemon. The unit is named by the project's id, so renaming the project in T3 doesn't orphan it, and `start` shows the project's title next to the id.
+
+Each Daemon is pinned to its project. `start` saves the project's id, the flags you passed, the absolute path of the Local Config (if any) and the Global Config location into the unit, so it doesn't depend on the directory you ran `start` from:
 
 ```sh
 cd ~/projects/my-app
 linear-t3 start --team FIT --status Todo --model opus-5.5
 ```
 
-`restart` keeps what's pinned; it rereads the Config files, so file changes apply. To change the project or the flags, run `start` again. `status` shows the pinned project and Config files.
+`restart` keeps what's pinned; it rereads the Config files, so file changes apply. To change the flags, run `start` again. `status` shows the pinned project and Config files.
+
+`stop`, `restart`, `status`, `logs` and `uninstall` act on one Daemon, picked the way `start` picks the project: `--project`, then the Local Config, then the repository's T3 project. They also take `--config` and `--no-config`. So in a repository they act on its Daemon, and `--project <id, title or folder>` reaches any Daemon from anywhere:
+
+```sh
+linear-t3 logs -f                    # in ~/projects/my-app: my-app's Daemon
+linear-t3 restart --project other    # from anywhere
+```
+
+When no project resolves, for example outside any repository, they use the only installed Daemon. If several are installed, they fail and list them, so you never act on the wrong one.
 
 `start` refuses to run from the npx cache, because npm may clean it up and leave the service pointing at nothing. Install it first with `npm i -g linear-t3`.
 
@@ -237,14 +248,14 @@ Other platforms can still use `run` under their own supervisor.
 
 linear-t3 keeps its files in [XDG](https://specifications.freedesktop.org/basedir-spec/latest/) locations:
 
-| File          | Location                                                                                                                               |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Global Config | `$LINEAR_T3_CONFIG`, else `$XDG_CONFIG_HOME/linear-t3/config.json` (default `~/.config/linear-t3/...`)                                 |
-| Local Config  | `--config <path>`, else the nearest `linear-t3.config.json` from the working directory up to the Git root                              |
-| Credentials   | `$XDG_CONFIG_HOME/linear-t3/credentials`, `KEY=value` lines, mode `0600`                                                               |
-| State         | `stateFile` from the Global Config, relative to its folder, else `$XDG_STATE_HOME/linear-t3/state.json` (default `~/.local/state/...`) |
-| Log           | macOS: `$XDG_STATE_HOME/linear-t3/daemon.log`. Linux: the systemd user journal                                                         |
-| Unit          | macOS: `~/Library/LaunchAgents/linear-t3.plist`. Linux: `$XDG_CONFIG_HOME/systemd/user/linear-t3.service`                              |
+| File          | Location                                                                                                                                            |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Global Config | `$LINEAR_T3_CONFIG`, else `$XDG_CONFIG_HOME/linear-t3/config.json` (default `~/.config/linear-t3/...`)                                              |
+| Local Config  | `--config <path>`, else the nearest `linear-t3.config.json` from the working directory up to the Git root                                           |
+| Credentials   | `$XDG_CONFIG_HOME/linear-t3/credentials`, `KEY=value` lines, mode `0600`                                                                            |
+| State         | `stateFile` from the Global Config, relative to its folder, else `$XDG_STATE_HOME/linear-t3/state.json` (default `~/.local/state/...`)              |
+| Log           | One per Daemon. macOS: `$XDG_STATE_HOME/linear-t3/daemon-<project id>.log`. Linux: the systemd user journal, unit `linear-t3-<project id>`          |
+| Unit          | One per Daemon. macOS: `~/Library/LaunchAgents/linear-t3.<project id>.plist`. Linux: `$XDG_CONFIG_HOME/systemd/user/linear-t3-<project id>.service` |
 
 `LINEAR_API_KEY` and `T3_TOKEN` in the environment take precedence over the Credentials file for `run`, but not for the background service, which only reads the Credentials. `T3CODE_HOME` (default `~/.t3`) is where the Daemon finds T3 Code's environment id for the thread link in the Linear comment. `start` passes `LINEAR_T3_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `T3CODE_HOME` on to the background service, so it finds the same files.
 
@@ -254,7 +265,7 @@ Up to linear-t3 0.2, one Global Config listed every project under `projects`, wi
 
 - **One Global Config** with the machine settings (`t3Url`, `maxRunningThreads`, `stateFile`) and anything every run shares from `defaults`.
 - **One Local Config per project**: a `linear-t3.config.json` in each repository, holding that entry's `project`, `team`, filters and any other settings it overrode. Keep a project's former key as `project`, or drop it and run from inside the repository.
-- **One background service, for one project**: run `linear-t3 start` again in the repository it should watch. A service installed by 0.2 passes its Config as `--config`, which now names a Local Config, so it stops working until you do. There is only one background service per machine, so watch any other projects with `linear-t3 run` in a terminal or under your own supervisor.
+- **One background service, for one project**: run `linear-t3 start` again in the repository it should watch. A service installed by 0.2 passes its Config as `--config`, which now names a Local Config, so it stops working until you do. To watch other projects in the background too, run `linear-t3 start` in each of their repositories; each gets its own Daemon.
 
 Old keys and their replacements:
 

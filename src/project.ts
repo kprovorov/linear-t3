@@ -22,7 +22,7 @@ const describeProjects = (projects: T3Project[]) =>
  * The T3 project to watch: the one `project` names, by id, unique title or folder path, or else
  * the one whose folder is the Git root (or the working directory outside Git).
  */
-export function findProject(projects: T3Project[], config: Config): T3Project {
+export function findProject(projects: T3Project[], config: Pick<Config, "project">): T3Project {
   const { project } = config;
   // A relative path is relative to the Config file that set it.
   const folder = "ref" in project ? resolve(project.base, project.ref) : project.folder;
