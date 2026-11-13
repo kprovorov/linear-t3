@@ -456,17 +456,13 @@ export interface ConfigSources {
   defaultState: string;
 }
 
-/**
- * The effective Config: per key, the CLI flags, else the Local Config, else the Global Config,
- * else the built-in default. Keys T3's settings default are left unset for the Daemon to fill in. A value replaces the lower one whole, except a `merges` list (`label`), which adds every layer's items.
- */
-export async function loadConfig({
+/** The layers of `sources`, highest first: the flags, then the Local and the Global Config. */
+async function readLayers({
   global: globalPath,
   local: explicitLocal,
   cwd,
   flags = {},
-  defaultState,
-}: ConfigSources): Promise<Config> {
+}: Omit<ConfigSources, "defaultState">): Promise<{ layers: Layer[]; localLayer?: Layer }> {
   const localPath =
     explicitLocal === false
       ? undefined
@@ -485,24 +481,62 @@ export async function loadConfig({
 
   const cliLayer: Layer = { base: cwd, values: flags };
   const layers = [cliLayer, localLayer, globalLayer].filter((layer) => layer !== undefined);
-  const sources: Config["sources"] = {};
+  return { layers, localLayer };
+}
+
+/** The T3 project the highest of `layers` that sets `project` names, or else the folder to infer it from. */
+function projectOf(layers: Layer[], cwd: string): Config["project"] {
+  const layer = layers.find((layer) => layer.values.project !== undefined);
+  return projectIn(layer, cwd);
+}
+
+/** The T3 project `layer`'s `project` names, or with no layer, the folder to infer it from. */
+const projectIn = (layer: Layer | undefined, cwd: string): Config["project"] =>
+  layer?.values.project === undefined
+    ? { folder: gitRoot(cwd) ?? resolve(cwd) }
+    : { ref: layer.values.project, base: layer.base };
+
+/**
+ * Only what picks the T3 project, for commands that act on a project's background Daemon and
+ * need no other key: the project, where T3 is, and the Local Config read.
+ */
+export async function loadProjectConfig(
+  sources: Omit<ConfigSources, "defaultState">,
+): Promise<{ project: Config["project"]; t3Url: string; local?: string }> {
+  const { layers, localLayer } = await readLayers(sources);
+  const t3Url = layers.find((layer) => layer.values.t3Url !== undefined)?.values.t3Url;
+  return {
+    project: projectOf(layers, sources.cwd),
+    t3Url: t3Url ?? DEFAULT_T3_URL,
+    local: localLayer?.path,
+  };
+}
+
+/**
+ * The effective Config: per key, the CLI flags, else the Local Config, else the Global Config,
+ * else the built-in default. Keys T3's settings default are left unset for the Daemon to fill in. A value replaces the lower one whole, except a `merges` list (`label`), which adds every layer's items.
+ */
+export async function loadConfig(sources: ConfigSources): Promise<Config> {
+  const { global: globalPath, cwd, defaultState } = sources;
+  const { layers, localLayer } = await readLayers(sources);
+  const keySources: Config["sources"] = {};
   const pick = <K extends Key>(key: K): { value?: Value<K>; layer?: Layer } => {
     if ((KEYS[key] as KeyDeclaration).merges) return { value: merge(key) as Value<K> };
     for (const layer of layers) {
       if (layer.values[key] !== undefined) {
-        sources[key] = layer.path ?? `--${flagName(key)}`;
+        keySources[key] = layer.path ?? `--${flagName(key)}`;
         return { value: layer.values[key], layer };
       }
     }
     const fallback = (KEYS[key] as KeyDeclaration).fallback as Value<K> | undefined;
-    if (fallback !== undefined) sources[key] = "default";
+    if (fallback !== undefined) keySources[key] = "default";
     return { value: fallback };
   };
   /** Every layer's items of a `merges` list, lowest layer first, each name once ignoring case. */
   const merge = (key: Key): string[] | undefined => {
     const setting = [...layers].reverse().filter((layer) => layer.values[key] !== undefined);
     if (setting.length === 0) return undefined;
-    sources[key] = setting.map((layer) => layer.path ?? `--${flagName(key)}`).join(", ");
+    keySources[key] = setting.map((layer) => layer.path ?? `--${flagName(key)}`).join(", ");
     const items = setting.flatMap((layer) => layer.values[key] as string[]);
     return items.filter(
       (item, index) =>
@@ -521,13 +555,9 @@ export async function loadConfig({
     return value;
   };
 
-  const project = pick("project");
   const stateFile = get("stateFile");
   return {
-    project:
-      project.value === undefined
-        ? { folder: gitRoot(cwd) ?? resolve(cwd) }
-        : { ref: project.value, base: project.layer?.base ?? cwd },
+    project: projectIn(pick("project").layer, cwd),
     team: required("team"),
     status: get("status"),
     label: get("label"),
@@ -548,6 +578,6 @@ export async function loadConfig({
     t3Url: required("t3Url"),
     stateFile: stateFile ? resolveStateFile(globalPath, stateFile) : defaultState,
     files: { global: globalPath, local: localLayer?.path },
-    sources,
+    sources: keySources,
   };
 }

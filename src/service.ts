@@ -1,4 +1,6 @@
 import { execFile, spawn } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Values } from "./config.ts";
 import { flagArgs } from "./flags.ts";
@@ -22,8 +24,10 @@ export interface ServiceStatus {
   hint?: string;
 }
 
-/** The OS service manager that keeps the Daemon running in the background. See ADR 0001. */
+/** The OS service manager that keeps one T3 project's Daemon running in the background. See ADR 0001 and 0004. */
 export interface ServiceManager {
+  /** The T3 project's id, which names the unit. */
+  project: string;
   /** What the unit is called in messages, e.g. `launchd agent`. */
   kind: string;
   /** The unit file, e.g. the launchd agent. */
@@ -45,11 +49,66 @@ export interface ServiceManager {
   uninstall(): Promise<void>;
 }
 
+/** A background Daemon whose unit is installed. */
+export interface InstalledDaemon {
+  /** The T3 project's id, read from the unit's name. */
+  project: string;
+  /** What the unit runs. */
+  unit: Unit;
+}
+
+/** The OS service manager, for every background Daemon on this machine. */
+export interface ServicePlatform {
+  /** The service manager for the Daemon of the T3 project with id `project`. */
+  daemon(project: string): ServiceManager;
+  /** Every installed Daemon, found by its unit's name, in project id order. */
+  list(): InstalledDaemon[];
+}
+
 /** A failure to report to the user as-is. */
 export class ServiceError extends Error {}
 
+// What can go in a unit's name and file name as is. T3's ids are UUIDs.
+const UNIT_ID = /^[A-Za-z0-9_-]+$/;
+
+/** Throws unless `project` can name a unit. */
+export function checkUnitId(project: string): string {
+  if (!UNIT_ID.test(project)) {
+    throw new ServiceError(
+      `T3 project id "${project}" can't name a background service; use \`linear-t3 run\` for it`,
+    );
+  }
+  return project;
+}
+
+/** Whether a unit file's name part could be a project id; other files are skipped. */
+export const isUnitId = (text: string) => UNIT_ID.test(text);
+
+/**
+ * The Daemons whose unit files in `dir` match `pattern`, which captures the project id, read with
+ * `read`. A file that can't be read, such as a dangling link, is skipped.
+ */
+export function listUnits(
+  dir: string,
+  pattern: RegExp,
+  read: (path: string) => Unit,
+): InstalledDaemon[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .sort()
+    .flatMap((file) => {
+      const project = pattern.exec(file)?.[1];
+      if (!project || !isUnitId(project)) return [];
+      try {
+        return [{ project, unit: read(join(dir, file)) }];
+      } catch {
+        return [];
+      }
+    });
+}
+
 /** The service manager for this platform. */
-export function serviceManager(paths: Paths): ServiceManager {
+export function servicePlatform(paths: Paths): ServicePlatform {
   if (process.platform === "darwin") return launchd(paths);
   if (process.platform === "linux") return systemd(paths);
   throw new ServiceError("The background service is macOS and Linux only");

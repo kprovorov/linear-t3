@@ -2219,6 +2219,11 @@ interface ServiceSetup {
   linearFilters: () => unknown[];
   /** Says the service is running, so commands that act on a running service can be checked. */
   markRunning: () => void;
+  resetCalls: () => void;
+  /** The unit file of T3 project `project`'s Daemon. */
+  unitOf: (project: string) => string;
+  /** How service manager calls name T3 project `project`'s Daemon. */
+  unitName: (project: string) => string;
 }
 
 /** Undoes a unit file's escaping of one quoted word; ExecStart words also doubled `$`. */
@@ -2256,6 +2261,10 @@ function launchdPinned(agent: string) {
     env: Object.fromEntries(keys.map((key, i) => [key, values[i]!])),
   };
 }
+
+/** Where a launchd agent sends the Daemon's output. */
+const launchdLog = (agent: string) =>
+  /<key>StandardOutPath<\/key>\s*<string>([^<]*)<\/string>/.exec(agent)![1]!;
 
 /** Tests for what `start` checks first and for commands that need the service installed. */
 function startAndInstalledChecks(service: (labels?: string[]) => Promise<ServiceSetup>) {
@@ -2481,11 +2490,14 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
     ]);
   });
 
-  test("--project on start is resolved to the project's id", async () => {
-    const { files, cli, pinned, projects } = await service();
+  test("--project on start is resolved to the project's id, which names the Daemon", async () => {
+    const { files, cli, projects, unitOf } = await service();
     projects.push({ id: "project-2", title: "other", workspaceRoot: "/work/other" });
     expect((await cli("start", "--project", "other")).status).toBe(0);
-    expect(pinned().args.slice(3, 5)).toEqual(["--project=project-2", `--config=${files.local}`]);
+    expect(existsSync(files.unit)).toBe(false);
+    const unit = readFileSync(unitOf("project-2"), "utf8");
+    expect(unit).toContain("--project=project-2");
+    expect(unit).toContain(`--config=${files.local}`);
   });
 
   test("restart keeps what's pinned", async () => {
@@ -2502,7 +2514,7 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
     expect((await cli("start")).status).toBe(0);
     const result = await startCli({ cwd: tmpdir(), env }, ["status"]).result;
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("Project:       project-1\n");
+    expect(result.stdout).toContain('Project:       "my-app" (project-1)\n');
     expect(result.stdout).toContain(`Global Config: ${files.config}\n`);
     expect(result.stdout).toContain(`Local Config:  ${files.local}\n`);
   });
@@ -2536,6 +2548,136 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
       expect(calls()).toEqual([]);
     },
   );
+
+  // Each test runs the CLI several times, against T3.
+  describe("with a Daemon per T3 project", { timeout: 30_000 }, () => {
+    /** `service()` plus a second repository, for T3 project `project-2` titled `other`. */
+    async function twoRepositories() {
+      const setup = await service();
+      const other = repoDir({ project: undefined });
+      setup.projects.push({ id: "project-2", title: "other", workspaceRoot: other });
+      const cliIn = (cwd: string, ...args: string[]) =>
+        startCli({ cwd, env: setup.env }, args).result;
+      /** The calls that name a Daemon, each by the project it names. */
+      const named = () =>
+        setup
+          .calls()
+          .flatMap((call) =>
+            ["project-1", "project-2"].filter((project) => call.includes(setup.unitName(project))),
+          );
+      return { ...setup, other, cliIn, named };
+    }
+
+    /** Both repositories' Daemons started and running, with the calls reset. */
+    async function twoDaemons() {
+      const setup = await twoRepositories();
+      expect((await setup.cli("start")).status).toBe(0);
+      expect((await setup.cliIn(setup.other, "start")).status).toBe(0);
+      setup.markRunning();
+      setup.resetCalls();
+      return setup;
+    }
+
+    test("start in a second repository adds its Daemon and leaves the first one alone", async () => {
+      const setup = await twoRepositories();
+      expect((await setup.cli("start")).status).toBe(0);
+      const first = readFileSync(setup.files.unit, "utf8");
+      setup.markRunning();
+      setup.resetCalls();
+      const result = await setup.cliIn(setup.other, "start");
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toContain(setup.unitOf("project-2"));
+      expect(result.stdout).toContain('Pinned to T3 project "other" (project-2)');
+      expect(readFileSync(setup.files.unit, "utf8")).toBe(first);
+      expect(setup.named()).toContain("project-2");
+      expect(setup.named()).not.toContain("project-1");
+    });
+
+    test("start again in a repository replaces only its own Daemon", async () => {
+      const setup = await twoDaemons();
+      const second = readFileSync(setup.unitOf("project-2"), "utf8");
+      expect((await setup.cli("start", "--team", "OPS")).status).toBe(0);
+      expect(setup.pinned().args).toContain("--team=OPS");
+      expect(readFileSync(setup.unitOf("project-2"), "utf8")).toBe(second);
+      expect(setup.named()).not.toContain("project-2");
+    });
+
+    test.each(["stop", "restart", "uninstall"])(
+      "%s in a repository acts on its project's Daemon only",
+      async (command) => {
+        const setup = await twoDaemons();
+        const result = await setup.cliIn(setup.other, command);
+        expect(result).toMatchObject({ status: 0, stderr: "" });
+        expect(result.stdout).toContain('"other" (project-2)');
+        expect(setup.named()).toContain("project-2");
+        expect(setup.named()).not.toContain("project-1");
+        expect(existsSync(setup.files.unit)).toBe(true);
+        expect(existsSync(setup.unitOf("project-2"))).toBe(command !== "uninstall");
+      },
+    );
+
+    test.each([
+      ["stop", "other"],
+      ["restart", "project-2"],
+      ["uninstall", "other"],
+    ])(
+      "%s --project %s acts on that project's Daemon from any directory",
+      async (command, project) => {
+        const setup = await twoDaemons();
+        const result = await setup.cliIn(tmpdir(), command, "--project", project);
+        expect(result).toMatchObject({ status: 0, stderr: "" });
+        expect(setup.named()).toContain("project-2");
+        expect(setup.named()).not.toContain("project-1");
+      },
+    );
+
+    test.each(["stop", "restart", "uninstall"])(
+      "%s with no project resolving here uses the only installed Daemon",
+      async (command) => {
+        const setup = await twoRepositories();
+        expect((await setup.cliIn(setup.other, "start")).status).toBe(0);
+        setup.markRunning();
+        setup.resetCalls();
+        const result = await setup.cliIn(tmpdir(), command);
+        expect(result).toMatchObject({ status: 0, stderr: "" });
+        expect(setup.named()).toContain("project-2");
+      },
+    );
+
+    test.each(["stop", "restart", "logs", "uninstall", "status"])(
+      "%s with several Daemons and no project resolving here fails and lists them",
+      async (command) => {
+        const setup = await twoDaemons();
+        const result = await setup.cliIn(tmpdir(), command);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("Several background Daemons are installed");
+        expect(result.stderr).toContain(`"my-app" (project-1), Local Config ${setup.files.local}`);
+        expect(result.stderr).toContain(
+          `"other" (project-2), Local Config ${join(setup.other, LOCAL)}`,
+        );
+        expect(setup.calls()).toEqual([]);
+      },
+    );
+
+    test("a repository whose T3 project has no Daemon fails, naming it and the installed ones", async () => {
+      const setup = await twoRepositories();
+      expect((await setup.cli("start")).status).toBe(0);
+      setup.resetCalls();
+      const result = await setup.cliIn(setup.other, "stop");
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('T3 project "other" (project-2) has no background Daemon');
+      expect(result.stderr).toContain('"my-app" (project-1)');
+      expect(setup.calls()).toEqual([]);
+    });
+
+    test("status shows the Daemon of the working directory's project, by title and id", async () => {
+      const setup = await twoDaemons();
+      const result = await setup.cliIn(setup.other, "status");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('Project:       "other" (project-2)\n');
+      expect(result.stdout).toContain(`Unit:          ${setup.unitOf("project-2")}\n`);
+    });
+  });
 }
 
 // launchd only exists on macOS; CI runs this suite on a macOS runner.
@@ -2544,7 +2686,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
   afterEach(() => cleanup.splice(0).forEach((close) => close()));
 
   const uid = process.getuid!();
-  const target = `gui/${uid}/linear-t3`;
+  const target = `gui/${uid}/linear-t3.project-1`;
 
   /**
    * A fresh home with a valid Config and Credentials, fake T3 and Linear servers that accept only
@@ -2560,8 +2702,8 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
     const home = homeDir();
     const files = {
       ...locations(home),
-      log: join(home.XDG_STATE_HOME, "linear-t3", "daemon.log"),
-      unit: join(home.HOME, "Library", "LaunchAgents", "linear-t3.plist"),
+      log: join(home.XDG_STATE_HOME, "linear-t3", "daemon-project-1.log"),
+      unit: join(home.HOME, "Library", "LaunchAgents", "linear-t3.project-1.plist"),
       local: join(dir, LOCAL),
     };
     writeFile(files.config, JSON.stringify({ t3Url: t3.url }));
@@ -2584,7 +2726,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
     );
     const env = { ...home, LINEAR_API_URL: linear.url, PATH: `${bin}:${process.env.PATH}` };
     const recorded = () =>
-      existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [];
+      existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean) : [];
     return {
       env,
       dir,
@@ -2597,6 +2739,10 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
       markRunning: () => writeFileSync(printed, runningPrint()),
       print: (output: string) => writeFileSync(printed, output),
       resetCalls: () => writeFileSync(calls, ""),
+      unitOf: (project: string) =>
+        join(home.HOME, "Library", "LaunchAgents", `linear-t3.${project}.plist`),
+      unitName: (project: string) => `linear-t3.${project}`,
+      logOf: (project: string) => join(home.XDG_STATE_HOME, "linear-t3", `daemon-${project}.log`),
     };
   }
 
@@ -2612,7 +2758,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
 
   /** What `launchctl print` shows for the agent, around `details`. */
   const printed = (details: string) =>
-    `${target} = {\n\tactive count = 1\n\tpath = /x/linear-t3.plist\n\t${details}\n}\n`;
+    `${target} = {\n\tactive count = 1\n\tpath = /x/linear-t3.project-1.plist\n\t${details}\n}\n`;
   const runningPrint = () => printed(`state = running\n\tpid = ${process.pid}`);
 
   /** The agent `start` should write for `files`, with `env` as its environment. */
@@ -2625,7 +2771,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
 <plist version="1.0">
 <dict>
 \t<key>Label</key>
-\t<string>linear-t3</string>
+\t<string>linear-t3.project-1</string>
 \t<key>ProgramArguments</key>
 \t<array>
 \t\t<string>${process.execPath}</string>
@@ -2767,13 +2913,12 @@ ${variables}\t</dict>
 
   /** The lines `status` prints for where everything lives; the pinned ones once installed. */
   const whereLines = (files: Record<string, string>, installed = true) => [
-    ...(installed ? ["Project:       project-1"] : []),
+    ...(installed ? ['Project:       "my-app" (project-1)'] : []),
     `Global Config: ${files.config}`,
     ...(installed ? [`Local Config:  ${files.local}`] : []),
     `Credentials:   ${files.credentials}`,
     `State:         ${files.state}`,
-    `Log:           ${files.log}`,
-    `Unit:          ${files.unit}`,
+    ...(installed ? [`Log:           ${files.log}`, `Unit:          ${files.unit}`] : []),
   ];
 
   test("status shows a running Daemon's pid and uptime, and where everything lives", async () => {
@@ -2866,6 +3011,21 @@ ${variables}\t</dict>
     cli.child.kill("SIGINT");
     expect((await cli.result).stdout).toBe("before\nafter\n");
   });
+
+  test("each Daemon logs to its own file, and logs shows only that one", async () => {
+    const setup = await service();
+    const other = repoDir({ project: undefined });
+    setup.projects.push({ id: "project-2", title: "other", workspaceRoot: other });
+    expect((await setup.cli("start")).status).toBe(0);
+    expect((await startCli({ cwd: other, env: setup.env }, ["start"]).result).status).toBe(0);
+    const log = (unit: string) => launchdLog(readFileSync(unit, "utf8"));
+    expect(log(setup.files.unit)).toBe(setup.files.log);
+    expect(log(setup.unitOf("project-2"))).toBe(setup.logOf("project-2"));
+    writeFile(setup.files.log, "first project\n");
+    writeFile(setup.logOf("project-2"), "second project\n");
+    const result = await startCli({ cwd: other, env: setup.env }, ["logs"]).result;
+    expect(result).toEqual({ status: 0, stdout: "second project\n", stderr: "" });
+  });
 });
 
 // systemd only exists on Linux; CI runs this suite on an Ubuntu runner.
@@ -2891,7 +3051,7 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
     const home = homeDir();
     const files = {
       ...locations(home),
-      unit: join(home.XDG_CONFIG_HOME, "systemd", "user", "linear-t3.service"),
+      unit: join(home.XDG_CONFIG_HOME, "systemd", "user", "linear-t3-project-1.service"),
       local: join(dir, LOCAL),
     };
     writeFile(files.config, JSON.stringify({ t3Url: t3.url }));
@@ -2927,7 +3087,8 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
       dir,
       files,
       cli: (...args: string[]) => startCli({ cwd: dir, env }, args).result,
-      calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []),
+      calls: () =>
+        existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean) : [],
       pinned: () => systemdPinned(readFileSync(files.unit, "utf8")),
       projects,
       linearFilters: () => linear.filters,
@@ -2936,6 +3097,9 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
       show: (output: string) => writeFileSync(shown, output),
       enableLinger: () => writeFileSync(linger, ""),
       resetCalls: () => writeFileSync(calls, ""),
+      unitOf: (project: string) =>
+        join(home.XDG_CONFIG_HOME, "systemd", "user", `linear-t3-${project}.service`),
+      unitName: (project: string) => `linear-t3-${project}.service`,
     };
   }
 
@@ -2945,7 +3109,7 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
       .map(([key, value]) => `Environment="${key}=${value}"\n`)
       .join("");
     return `[Unit]
-Description=linear-t3 Daemon
+Description=linear-t3 Daemon for T3 project project-1
 
 [Service]
 ExecStart="${process.execPath}" "${cliPath}" "run" "--project=project-1" "--config=${files.local}"
@@ -2974,8 +3138,8 @@ WantedBy=default.target
     );
     expect(calls()).toEqual([
       "systemctl --user daemon-reload",
-      "systemctl --user enable linear-t3.service",
-      "systemctl --user restart linear-t3.service",
+      "systemctl --user enable linear-t3-project-1.service",
+      "systemctl --user restart linear-t3-project-1.service",
     ]);
   });
 
@@ -3001,8 +3165,8 @@ WantedBy=default.target
     expect(readFileSync(files.unit, "utf8")).toContain('"run" "--project=project-1"');
     expect(calls()).toEqual([
       "systemctl --user daemon-reload",
-      "systemctl --user enable linear-t3.service",
-      "systemctl --user restart linear-t3.service",
+      "systemctl --user enable linear-t3-project-1.service",
+      "systemctl --user restart linear-t3-project-1.service",
     ]);
   });
 
@@ -3055,7 +3219,10 @@ WantedBy=default.target
     const { status } = await startCli({ cwd: dir, env: home }, ["start"]).result;
     expect(status).toBe(0);
     expect(
-      readFileSync(join(env.HOME, ".config", "systemd", "user", "linear-t3.service"), "utf8"),
+      readFileSync(
+        join(env.HOME, ".config", "systemd", "user", "linear-t3-project-1.service"),
+        "utf8",
+      ),
     ).toBe(expectedUnit(files, { LINEAR_T3_CONFIG: config }));
   });
 
@@ -3076,15 +3243,15 @@ WantedBy=default.target
   test("stop stops the Daemon and disables it so it doesn't start at login", async () => {
     const { cli, calls } = await installed();
     expect(await cli("stop")).toMatchObject({ status: 0, stderr: "" });
-    expect(calls()).toEqual(["systemctl --user disable --now linear-t3.service"]);
+    expect(calls()).toEqual(["systemctl --user disable --now linear-t3-project-1.service"]);
   });
 
   test("restart enables the unit again and restarts the Daemon", async () => {
     const { cli, calls } = await installed("stopped");
     expect(await cli("restart")).toMatchObject({ status: 0, stderr: "" });
     expect(calls()).toEqual([
-      "systemctl --user enable linear-t3.service",
-      "systemctl --user restart linear-t3.service",
+      "systemctl --user enable linear-t3-project-1.service",
+      "systemctl --user restart linear-t3-project-1.service",
     ]);
   });
 
@@ -3094,7 +3261,7 @@ WantedBy=default.target
     const result = await cli("uninstall");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(calls()).toEqual([
-      "systemctl --user disable --now linear-t3.service",
+      "systemctl --user disable --now linear-t3-project-1.service",
       "systemctl --user daemon-reload",
     ]);
     expect(existsSync(files.unit)).toBe(false);
@@ -3123,13 +3290,14 @@ WantedBy=default.target
 
   /** The lines `status` prints for where everything lives; the pinned ones once installed. */
   const whereLines = (files: Record<string, string>, installed = true) => [
-    ...(installed ? ["Project:       project-1"] : []),
+    ...(installed ? ['Project:       "my-app" (project-1)'] : []),
     `Global Config: ${files.config}`,
     ...(installed ? [`Local Config:  ${files.local}`] : []),
     `Credentials:   ${files.credentials}`,
     `State:         ${files.state}`,
-    "Log:           journalctl --user -u linear-t3",
-    `Unit:          ${files.unit}`,
+    ...(installed
+      ? ["Log:           journalctl --user -u linear-t3-project-1", `Unit:          ${files.unit}`]
+      : []),
   ];
 
   test("status shows a running Daemon's pid and uptime, where everything lives, and the linger hint", async () => {
@@ -3142,7 +3310,7 @@ WantedBy=default.target
     );
     expect(lines.slice(1)).toEqual([...whereLines(files), "", lingerHint]);
     expect(calls()).toEqual([
-      "systemctl --user show linear-t3.service --property=ActiveState,SubState,MainPID",
+      "systemctl --user show linear-t3-project-1.service --property=ActiveState,SubState,MainPID",
       `loginctl show-user ${uid} --property=Linger --value`,
     ]);
   });
@@ -3180,7 +3348,7 @@ WantedBy=default.target
     expect(calls()).toEqual([]);
   });
 
-  test("status reads the Local Config of a unit from before projects were pinned", async () => {
+  test("status reads the Local Config a unit passes as `--config <path>`, as before projects were pinned", async () => {
     const { files, cli } = await installed("stopped");
     writeFileSync(
       files.unit,
@@ -3190,7 +3358,7 @@ WantedBy=default.target
       ),
     );
     const { stdout } = await cli("status");
-    expect(stdout).toContain("Project:       not pinned, run `linear-t3 start` again\n");
+    expect(stdout).toContain('Project:       "my-app" (project-1)\n');
     expect(stdout).toContain(`Local Config:  ${files.local}\n`);
   });
 
@@ -3211,7 +3379,7 @@ WantedBy=default.target
   test("logs shows the Daemon's journal", async () => {
     const { cli, calls } = await installed();
     expect(await cli("logs")).toEqual({ status: 0, stdout: "journal line\n", stderr: "" });
-    expect(calls()).toEqual(["journalctl --user -u linear-t3 -n 100 --no-pager"]);
+    expect(calls()).toEqual(["journalctl --user -u linear-t3-project-1 -n 100 --no-pager"]);
   });
 
   test("logs -f follows the journal until interrupted", async () => {
@@ -3220,7 +3388,18 @@ WantedBy=default.target
     await new Promise<void>((resolve) => cli.child.stdout!.once("data", () => resolve()));
     cli.child.kill("SIGINT");
     expect(await cli.result).toMatchObject({ status: 0, stdout: "journal line\n" });
-    expect(calls()).toEqual(["journalctl --user -u linear-t3 -n 100 --no-pager -f"]);
+    expect(calls()).toEqual(["journalctl --user -u linear-t3-project-1 -n 100 --no-pager -f"]);
+  });
+
+  test("logs shows only the journal of the working directory's project's Daemon", async () => {
+    const setup = await service();
+    const other = repoDir({ project: undefined });
+    setup.projects.push({ id: "project-2", title: "other", workspaceRoot: other });
+    expect((await setup.cli("start")).status).toBe(0);
+    expect((await startCli({ cwd: other, env: setup.env }, ["start"]).result).status).toBe(0);
+    setup.resetCalls();
+    expect((await startCli({ cwd: other, env: setup.env }, ["logs"]).result).status).toBe(0);
+    expect(setup.calls()).toEqual(["journalctl --user -u linear-t3-project-2 -n 100 --no-pager"]);
   });
 });
 

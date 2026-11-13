@@ -1,17 +1,22 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import type { Paths } from "./paths.ts";
 import {
   type ServiceManager,
+  type ServicePlatform,
   ServiceError,
   type Unit,
+  checkUnitId,
   elapsed,
+  listUnits,
   runAttached,
   runCommand,
 } from "./service.ts";
 
-const LABEL = "linear-t3";
+/** Each Daemon's label is this, a dot and its T3 project's id. */
+const LABEL_PREFIX = "linear-t3.";
+const AGENT_FILE = /^linear-t3\.(.+)\.plist$/;
 // Seconds launchd waits before restarting a crashed Daemon, and after SIGTERM before SIGKILL.
 const RESTART_DELAY = 10;
 const STOP_TIMEOUT = 30;
@@ -23,7 +28,7 @@ const unescapeXml = (text: string) =>
   text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 const string = (text: string) => `<string>${escapeXml(text)}</string>`;
 
-function plist(unit: Unit, log: string): string {
+function plist(label: string, unit: Unit, log: string): string {
   const env = Object.entries(unit.env)
     .map(([key, value]) => `\t\t<key>${key}</key>\n\t\t${string(value)}\n`)
     .join("");
@@ -32,7 +37,7 @@ function plist(unit: Unit, log: string): string {
 <plist version="1.0">
 <dict>
 \t<key>Label</key>
-\t${string(LABEL)}
+\t${string(label)}
 \t<key>ProgramArguments</key>
 \t<array>
 ${unit.program.map((arg) => `\t\t${string(arg)}\n`).join("")}\t</array>
@@ -78,10 +83,38 @@ function tail(log: string, follow: boolean): Promise<number> {
   return runAttached("tail", ["-n", "100", ...(follow ? ["-F"] : []), log]);
 }
 
-/** The Daemon as a launchd agent in `~/Library/LaunchAgents`. */
-export function launchd(paths: Paths): ServiceManager {
+/** What the agent at `path` runs, read back from it. */
+function readAgent(path: string): Unit {
+  const agent = readFileSync(path, "utf8");
+  const strings = (xml = "") =>
+    [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((match) => unescapeXml(match[1]!));
+  const program = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(agent);
+  const env = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(agent)?.[1];
+  const pairs = (env ?? "").matchAll(/<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g);
+  return {
+    program: strings(program?.[1]),
+    env: Object.fromEntries(
+      [...pairs].map(([, key, value]) => [unescapeXml(key!), unescapeXml(value!)]),
+    ),
+  };
+}
+
+/** Each Daemon as a launchd agent in `~/Library/LaunchAgents`, labeled by its T3 project's id. */
+export function launchd(paths: Paths): ServicePlatform {
+  const agentPath = (project: string) =>
+    join(paths.launchAgents, `${LABEL_PREFIX}${project}.plist`);
+  return {
+    daemon: (project) => agent(paths, checkUnitId(project), agentPath(project)),
+    list: () => listUnits(paths.launchAgents, AGENT_FILE, readAgent),
+  };
+}
+
+/** The Daemon of T3 project `project`, as the launchd agent at `agentPath`. */
+function agent(paths: Paths, project: string, agentPath: string): ServiceManager {
   const domain = `gui/${process.getuid!()}`;
-  const target = `${domain}/${LABEL}`;
+  const target = `${domain}/${LABEL_PREFIX}${project}`;
+  // Each Daemon writes its own log, so `logs` shows one project's output.
+  const log = join(paths.logs, `daemon-${project}.log`);
   const loaded = async () => (await launchctl("print", target)).ok;
   const unload = async () => {
     if (await loaded()) await mustLaunchctl("bootout", target);
@@ -92,39 +125,26 @@ export function launchd(paths: Paths): ServiceManager {
     // RunAtLoad starts the Daemon as soon as it's loaded. Right after a bootout launchd may still
     // be tearing the old job down and refuse, so give it a few tries.
     for (let attempt = 1; attempt < BOOTSTRAP_ATTEMPTS; attempt++) {
-      if ((await launchctl("bootstrap", domain, paths.launchAgent)).ok) return;
+      if ((await launchctl("bootstrap", domain, agentPath)).ok) return;
       await setTimeout(1000);
     }
-    await mustLaunchctl("bootstrap", domain, paths.launchAgent);
+    await mustLaunchctl("bootstrap", domain, agentPath);
   };
 
   return {
+    project,
     kind: "launchd agent",
-    unitPath: paths.launchAgent,
-    logLocation: paths.log,
-    installed: () => existsSync(paths.launchAgent),
-    pinned() {
-      if (!existsSync(paths.launchAgent)) return undefined;
-      const agent = readFileSync(paths.launchAgent, "utf8");
-      const strings = (xml = "") =>
-        [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((match) => unescapeXml(match[1]!));
-      const program = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(agent);
-      const env = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(agent)?.[1];
-      const pairs = (env ?? "").matchAll(/<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g);
-      return {
-        program: strings(program?.[1]),
-        env: Object.fromEntries(
-          [...pairs].map(([, key, value]) => [unescapeXml(key!), unescapeXml(value!)]),
-        ),
-      };
-    },
+    unitPath: agentPath,
+    logLocation: log,
+    installed: () => existsSync(agentPath),
+    pinned: () => (existsSync(agentPath) ? readAgent(agentPath) : undefined),
 
     async install(unit) {
       // launchd only rereads the agent when it loads it, so unload the old one first.
       await unload();
-      mkdirSync(dirname(paths.launchAgent), { recursive: true });
-      mkdirSync(dirname(paths.log), { recursive: true });
-      writeFileSync(paths.launchAgent, plist(unit, paths.log));
+      mkdirSync(dirname(agentPath), { recursive: true });
+      mkdirSync(dirname(log), { recursive: true });
+      writeFileSync(agentPath, plist(`${LABEL_PREFIX}${project}`, unit, log));
       await load();
     },
     async stop() {
@@ -145,10 +165,10 @@ export function launchd(paths: Paths): ServiceManager {
       if (!running || !pid) return { running: false };
       return { running, pid: Number(pid), uptime: await elapsed(Number(pid)) };
     },
-    logs: (follow) => tail(paths.log, follow),
+    logs: (follow) => tail(log, follow),
     async uninstall() {
       await unload();
-      rmSync(paths.launchAgent, { force: true });
+      rmSync(agentPath, { force: true });
     },
   };
 }
