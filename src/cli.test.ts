@@ -3847,6 +3847,27 @@ WantedBy=default.target
     expect(setup.calls()).toContain("systemctl --user disable --now linear-t3-project-2.service");
   });
 
+  test.runIf(process.getuid?.() !== 0)(
+    "uninstall --all keeps going past unit files it can't remove",
+    async () => {
+      const setup = await service();
+      const other = repoDir({ project: undefined });
+      setup.projects.push({ id: "project-2", title: "other", workspaceRoot: other });
+      expect((await setup.cli("start")).status).toBe(0);
+      expect((await startCli({ cwd: other, env: setup.env }, ["start"]).result).status).toBe(0);
+      // A unit directory that can be read but not written: every unit file stays.
+      const units = dirname(setup.files.unit);
+      chmodSync(units, 0o555);
+      const result = await startCli({ cwd: tmpdir(), env: setup.env }, ["uninstall", "--all"])
+        .result;
+      chmodSync(units, 0o755);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('The Daemon for "my-app" (project-1) failed:');
+      expect(result.stderr).toContain('The Daemon for "other" (project-2) failed:');
+      expect(setup.calls()).toContain("systemctl --user disable --now linear-t3-project-2.service");
+    },
+  );
+
   test("status reads the Local Config a unit passes as `--config <path>`, as before projects were pinned", async () => {
     const { files, cli } = await installed("stopped");
     writeFileSync(

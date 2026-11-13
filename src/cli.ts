@@ -263,8 +263,10 @@ async function eachTarget(
     try {
       await act(manager);
     } catch (error) {
-      if (!options.all || !(error instanceof ServiceError)) throw error;
-      console.error(`The Daemon for ${project} failed: ${error.message}`);
+      // Under --all, any failure, a service manager's or the file system's, is this Daemon's alone.
+      if (!options.all) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`The Daemon for ${project} failed: ${reason}`);
       failed = true;
       continue;
     }
