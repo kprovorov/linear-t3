@@ -144,9 +144,10 @@ export async function pickDaemon(
  * T3 or the token isn't there, so callers fall back to showing ids alone.
  */
 export async function projectTitles(paths: Paths): Promise<Map<string, string>> {
-  const token = t3Token(paths);
-  if (!token) return new Map();
   try {
+    // Even an unreadable Credentials file only costs the titles.
+    const token = t3Token(paths);
+    if (!token) return new Map();
     const { t3Url } = await loadGlobalConfig(paths.globalConfig);
     const projects = await t3Projects(t3Url, token);
     return new Map(projects.map((project) => [project.id, project.title]));

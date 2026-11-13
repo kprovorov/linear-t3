@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -2921,6 +2922,20 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
       expect(result.stdout).toContain("\nDaemon for project-1\n");
       expect(result.stdout).toContain("\nDaemon for project-2\n");
     });
+
+    test.runIf(process.getuid?.() !== 0)(
+      "an unreadable Credentials file costs status and --all only the titles",
+      async () => {
+        const setup = await twoDaemons();
+        chmodSync(setup.files.credentials, 0);
+        const status = await setup.cliIn(tmpdir(), "status");
+        expect(status).toMatchObject({ status: 0, stderr: "" });
+        expect(status.stdout).toContain("\nDaemon for project-1\n");
+        const stop = await setup.cliIn(tmpdir(), "stop", "--all");
+        expect(stop).toMatchObject({ status: 0, stderr: "" });
+        expect(setup.named()).toEqual(expect.arrayContaining(["project-1", "project-2"]));
+      },
+    );
 
     test("status warns about a missing node for the Daemon that runs it", async () => {
       const setup = await twoDaemons();
