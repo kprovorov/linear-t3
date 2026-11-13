@@ -1,4 +1,4 @@
-import { loadProjectConfig } from "./config.ts";
+import { loadGlobalConfig, loadProjectConfig } from "./config.ts";
 import { EnvFile } from "./env-file.ts";
 import type { Paths } from "./paths.ts";
 import { t3Projects } from "./preflight.ts";
@@ -16,6 +16,10 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 
 export const NOT_INSTALLED =
   "The Daemon isn't installed as a background service; run `linear-t3 start`";
+
+/** The T3 token, from the environment, else the Credentials. */
+const t3Token = (paths: Paths) =>
+  process.env.T3_TOKEN || new EnvFile(paths.credentials).get("T3_TOKEN");
 
 /** How a command names the Daemon to act on: the flags `start` resolves the project with. */
 export interface TargetOptions {
@@ -86,7 +90,7 @@ export async function pickDaemon(
   let projects: T3Project[] | undefined;
   let t3Problem: string | undefined;
   if (config) {
-    const token = process.env.T3_TOKEN || new EnvFile(paths.credentials).get("T3_TOKEN");
+    const token = t3Token(paths);
     if (token) {
       projects = await t3Projects(config.t3Url, token).catch((error: unknown) => {
         t3Problem = message(error);
@@ -133,4 +137,31 @@ export async function pickDaemon(
       ...(t3Problem ? [`(T3 couldn't say which project this is: ${t3Problem})`] : []),
     ].join("\n"),
   );
+}
+
+/**
+ * The titles T3 has for its projects, by id, read with the Global Config's T3 address. Empty when
+ * T3 or the token isn't there, so callers fall back to showing ids alone.
+ */
+export async function projectTitles(paths: Paths): Promise<Map<string, string>> {
+  const token = t3Token(paths);
+  if (!token) return new Map();
+  try {
+    const { t3Url } = await loadGlobalConfig(paths.globalConfig);
+    const projects = await t3Projects(t3Url, token);
+    return new Map(projects.map((project) => [project.id, project.title]));
+  } catch {
+    return new Map();
+  }
+}
+
+/** Every installed background Daemon, for `--all`, with its T3 project's title when T3 could say. */
+export async function allDaemons(platform: ServicePlatform, paths: Paths): Promise<Target[]> {
+  const installed = platform.list();
+  if (installed.length === 0) throw new ServiceError(NOT_INSTALLED);
+  const titles = await projectTitles(paths);
+  return installed.map(({ project }) => ({
+    manager: platform.daemon(project),
+    title: titles.get(project),
+  }));
 }

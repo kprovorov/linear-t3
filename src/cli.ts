@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as clack from "@clack/prompts";
-import { Argument, Command } from "commander";
+import { Argument, Command, Option } from "commander";
 import {
   CancelledError,
   ConnectError,
@@ -21,6 +21,7 @@ import { configFlags, configOptions } from "./flags.ts";
 import { resolvePaths } from "./paths.ts";
 import { preflight } from "./preflight.ts";
 import {
+  type ServiceManager,
   type ServicePlatform,
   ServiceError,
   daemonUnit,
@@ -28,7 +29,13 @@ import {
   pinnedTo,
   servicePlatform,
 } from "./service.ts";
-import { type TargetOptions, describeProject, pickDaemon } from "./target.ts";
+import {
+  type TargetOptions,
+  allDaemons,
+  describeProject,
+  pickDaemon,
+  projectTitles,
+} from "./target.ts";
 import { checkLinear } from "./token-check.ts";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -235,78 +242,136 @@ async function start(
 /** The installed Daemon the command's flags and working directory pick. */
 const target = (options: TargetOptions) => pickDaemon(servicePlatform(paths()), paths(), options);
 
-async function stop(options: TargetOptions): Promise<void> {
-  const { manager, title } = await target(options);
-  await manager.stop();
-  console.log(
-    `Stopped the Daemon for ${describeProject(manager.project, title)}; it won't start at login until \`linear-t3 start\``,
+/** The Daemons a command acts on: every installed one with `--all`, else the one `target` picks. */
+const targets = async ({ all, ...options }: TargetOptions & { all?: boolean }) =>
+  all ? allDaemons(servicePlatform(paths()), paths()) : [await target(options)];
+
+type AllOptions = TargetOptions & { all?: boolean };
+
+/**
+ * Runs `act` on each Daemon the command targets, printing `done` for each. With `--all`, one
+ * Daemon failing doesn't stop the rest; each failure is named, and the command exits 1 at the end.
+ */
+async function eachTarget(
+  options: AllOptions,
+  act: (manager: ServiceManager) => Promise<void>,
+  done: (manager: ServiceManager, project: string) => string,
+): Promise<void> {
+  let failed = false;
+  for (const { manager, title } of await targets(options)) {
+    const project = describeProject(manager.project, title);
+    try {
+      await act(manager);
+    } catch (error) {
+      if (!options.all || !(error instanceof ServiceError)) throw error;
+      console.error(`The Daemon for ${project} failed: ${error.message}`);
+      failed = true;
+      continue;
+    }
+    console.log(done(manager, project));
+  }
+  if (failed) process.exitCode = 1;
+}
+
+const stop = (options: AllOptions) =>
+  eachTarget(
+    options,
+    (manager) => manager.stop(),
+    (_, project) =>
+      `Stopped the Daemon for ${project}; it won't start at login until \`linear-t3 start\``,
   );
-}
 
-async function restart(options: TargetOptions): Promise<void> {
-  const { manager, title } = await target(options);
-  await manager.restart();
-  console.log(`Restarted the Daemon for ${describeProject(manager.project, title)}`);
-}
-
-async function uninstall(options: TargetOptions): Promise<void> {
-  const { manager, title } = await target(options);
-  await manager.uninstall();
-  console.log(
-    `Removed the Daemon for ${describeProject(manager.project, title)} (${manager.unitPath}); the Config, Credentials, State and log are kept`,
+const restart = (options: AllOptions) =>
+  eachTarget(
+    options,
+    (manager) => manager.restart(),
+    (_, project) => `Restarted the Daemon for ${project}`,
   );
-}
 
-async function status(options: TargetOptions): Promise<void> {
+const uninstall = (options: AllOptions) =>
+  eachTarget(
+    options,
+    (manager) => manager.uninstall(),
+    (manager, project) =>
+      `Removed the Daemon for ${project} (${manager.unitPath}); the Config, Credentials, State and log are kept`,
+  );
+
+/** `label: value` lines, with the values lined up. */
+const rows = (lines: [string, string | undefined][], indent = "") =>
+  lines.flatMap(([label, value]) =>
+    value === undefined ? [] : [`${indent}${`${label}:`.padEnd(15)}${value}`],
+  );
+
+/** Where the Global Config at `path` keeps State. An unreadable one can't say, so the default. */
+const statePath = (path: string, fallback: string) =>
+  loadGlobalConfig(path).then(
+    (config) => config.stateFile ?? fallback,
+    () => fallback,
+  );
+
+/** Every installed Daemon, wherever it's run from, after the files they share. */
+async function status(): Promise<void> {
   const where = paths();
   const platform = servicePlatform(where);
   await migrate(platform);
-  let daemon = "not installed, run `linear-t3 start`";
-  let hint: string | undefined;
-  let pinned: ReturnType<typeof pinnedTo> | undefined;
-  let found: Awaited<ReturnType<typeof target>> | undefined;
-  if (platform.list().length > 0) found = await pickDaemon(platform, where, options);
-  const manager = found?.manager;
-  const unit = manager?.pinned();
-  if (manager && unit) {
-    const service = await manager.status();
-    const { running, pid, uptime } = service;
-    hint = service.hint;
-    daemon = running ? `running (pid ${pid}${uptime ? `, up ${uptime}` : ""})` : "stopped";
+  const installed = platform.list();
+  const [state, titles] = await Promise.all([
+    statePath(where.globalConfig, where.defaultState),
+    installed.length > 0 ? projectTitles(where) : new Map<string, string>(),
+  ]);
+  const daemons = await Promise.all(
+    installed.map(async ({ project, unit }) => {
+      const manager = platform.daemon(project);
+      const pinned = pinnedTo(unit);
+      // Only when `start` ran with another Global Config than this command found.
+      const ownConfig =
+        pinned.globalConfig === undefined || pinned.globalConfig === where.globalConfig
+          ? undefined
+          : pinned.globalConfig;
+      const [service, ownState] = await Promise.all([
+        manager.status(),
+        ownConfig && statePath(ownConfig, where.defaultState),
+      ]);
+      return { manager, unit, pinned, service, ownConfig, ownState, project };
+    }),
+  );
+  // Each Daemon's service manager may say the same thing, like the linger hint; say it once.
+  const hints = new Set<string>();
+  const blocks = daemons.map(({ manager, unit, pinned, service, ownConfig, ownState, project }) => {
+    const name = describeProject(project, titles.get(project));
+    const { running, pid, uptime, hint } = service;
+    if (hint) hints.add(hint);
     const node = unit.program[0];
     if (node && !existsSync(node)) {
       console.error(
-        `The Daemon runs ${node}, which no longer exists; run \`linear-t3 start\` again to use this node`,
+        `The Daemon for ${name} runs ${node}, which no longer exists; run \`linear-t3 start\` again to use this node`,
       );
     }
-    pinned = pinnedTo(unit);
-  }
-  const globalConfig = pinned?.globalConfig ?? where.globalConfig;
-  // An unreadable Config can't say where State is, so show where it would be by default.
-  const state = await loadGlobalConfig(globalConfig).then(
-    (config) => config.stateFile ?? where.defaultState,
-    () => where.defaultState,
-  );
-  // The Daemon's rows only exist once installed.
-  const project = manager && describeProject(manager.project, found?.title);
-  const localConfig = pinned && (pinned.localConfig ?? "none");
-  const lines: [string, string | undefined][] = [
-    ["Daemon", daemon],
-    ["Project", project],
-    ["Global Config", globalConfig],
-    ["Local Config", localConfig],
+    return [
+      `Daemon for ${name}`,
+      ...rows(
+        [
+          ["Status", running ? `running (pid ${pid}${uptime ? `, up ${uptime}` : ""})` : "stopped"],
+          ["Local Config", pinned.localConfig ?? "none"],
+          ["Global Config", ownConfig],
+          ["State", ownState === state ? undefined : ownState],
+          ["Log", manager.logLocation],
+          ["Unit", manager.unitPath],
+        ],
+        "  ",
+      ),
+    ];
+  });
+  const shared = rows([
+    ["Global Config", where.globalConfig],
     ["Credentials", where.credentials],
     ["State", state],
-    ["Log", manager?.logLocation],
-    ["Unit", manager?.unitPath],
-  ];
+  ]);
+  const none = ["No background Daemons are installed; run `linear-t3 start` in a repository"];
   console.log(
-    [
-      ...lines.flatMap(([label, value]) =>
-        value === undefined ? [] : [`${`${label}:`.padEnd(15)}${value}`],
-      ),
-      ...(hint ? ["", hint] : []),
-    ].join("\n"),
+    [shared, ...(blocks.length > 0 ? blocks : [none]), ...(hints.size > 0 ? [[...hints]] : [])]
+      .map((block) => block.join("\n"))
+      .join("\n\n"),
   );
 }
 
@@ -385,18 +450,29 @@ function daemonCommand(name: string, description: string) {
     .option(...NO_CONFIG_OPTION);
 }
 
-daemonCommand("stop", "stop the Daemon and keep it from starting at login").action(
-  (options: TargetOptions) => exitOnServiceError(() => stop(options)),
+const ALL_OPTION = ["--all", "act on every installed Daemon, wherever this runs from"] as const;
+
+/** A command that acts on one installed Daemon, or with `--all` on every one. */
+const allCommand = (name: string, description: string) =>
+  daemonCommand(name, description).addOption(
+    new Option(...ALL_OPTION).conflicts(["project", "config"]),
+  );
+
+allCommand("stop", "stop the Daemon and keep it from starting at login").action(
+  (options: AllOptions) => exitOnServiceError(() => stop(options)),
 );
 
-daemonCommand(
+allCommand(
   "restart",
   "restart the Daemon with what `start` pinned, e.g. to pick up Config file changes; the project and flags stay pinned until `start` again",
-).action((options: TargetOptions) => exitOnServiceError(() => restart(options)));
+).action((options: AllOptions) => exitOnServiceError(() => restart(options)));
 
-daemonCommand("status", "show whether the Daemon is running and where its files are").action(
-  (options: TargetOptions) => exitOnServiceError(() => status(options)),
-);
+program
+  .command("status")
+  .description(
+    "show every installed Daemon, whether it's running and where its files are, wherever this runs from",
+  )
+  .action(() => exitOnServiceError(status));
 
 daemonCommand("logs", "show the Daemon's recent output")
   .option("-f, --follow", "keep printing new output")
@@ -404,9 +480,9 @@ daemonCommand("logs", "show the Daemon's recent output")
     exitOnServiceError(() => logs(options)),
   );
 
-daemonCommand(
+allCommand(
   "uninstall",
   "stop the Daemon and remove its background service; keeps the Config, Credentials, State and log",
-).action((options: TargetOptions) => exitOnServiceError(() => uninstall(options)));
+).action((options: AllOptions) => exitOnServiceError(() => uninstall(options)));
 
 await program.parseAsync();

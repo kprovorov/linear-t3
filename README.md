@@ -42,11 +42,11 @@ To keep the team and filters with the repository, put them in a [Local Config](#
 | `connect [t3\|linear]` | Gets, checks and saves the T3 token and the Linear API key in the Credentials file. Without an argument it does both, T3 first. Interactive, so run it in a terminal.            |
 | `run`                  | Runs the Daemon in the foreground until SIGINT or SIGTERM. Takes a flag for every [Config key](#config-keys); see [`run`](#run).                                                 |
 | `start`                | Takes the same flags as `run`, checks the Config and both tokens, then installs and starts a background Daemon for the T3 project. Run it again to change that project's Daemon. |
-| `stop`                 | Stops a project's Daemon and keeps it from starting at login until the next `start`.                                                                                             |
-| `restart`              | Restarts a project's Daemon with what `start` pinned, for example to pick up Config file changes.                                                                                |
-| `status`               | Shows whether a project's Daemon is running, its project, and where the Config files, Credentials, State, log and unit are.                                                      |
+| `stop [--all]`         | Stops a project's Daemon and keeps it from starting at login until the next `start`. `--all` stops every Daemon.                                                                 |
+| `restart [--all]`      | Restarts a project's Daemon with what `start` pinned, for example to pick up Config file changes. `--all` restarts every Daemon.                                                 |
+| `status`               | Lists every installed Daemon from any directory: its project, whether it's running, its Local Config, log and unit, after the shared files.                                      |
 | `logs [-f]`            | Shows a project's Daemon's recent output. `-f` (`--follow`) keeps printing new output.                                                                                           |
-| `uninstall`            | Stops a project's Daemon and removes its background service. The Config, Credentials, State and log are kept.                                                                    |
+| `uninstall [--all]`    | Stops a project's Daemon and removes its background service. `--all` removes every Daemon. The Config, Credentials, State and logs are kept.                                     |
 
 ### `connect`
 
@@ -227,16 +227,22 @@ cd ~/projects/my-app
 linear-t3 start --team FIT --status Todo --model opus-5.5
 ```
 
-`restart` keeps what's pinned; it rereads the Config files, so file changes apply. To change the flags, run `start` again. `status` shows the pinned project and Config files.
+`restart` keeps what's pinned; it rereads the Config files, so file changes apply. To change the flags, run `start` again.
 
-`stop`, `restart`, `status`, `logs` and `uninstall` act on one Daemon, picked the way `start` picks the project: `--project`, then the Local Config, then the repository's T3 project. They also take `--config` and `--no-config`. So in a repository they act on its Daemon, and `--project <id, title or folder>` reaches any Daemon from anywhere:
+`status` lists every installed Daemon, wherever you run it: its T3 project by title and id, whether it's running with its pid and uptime, and its Local Config, log and unit. The Global Config, Credentials and State are shared, so they're shown once, at the top.
+
+`stop`, `restart`, `logs` and `uninstall` act on one Daemon, picked the way `start` picks the project: `--project`, then the Local Config, then the repository's T3 project. They also take `--config` and `--no-config`. So in a repository they act on its Daemon, and `--project <id, title or folder>` reaches any Daemon from anywhere:
 
 ```sh
 linear-t3 logs -f                    # in ~/projects/my-app: my-app's Daemon
 linear-t3 restart --project other    # from anywhere
 ```
 
-When no project resolves, for example outside any repository, they use the only installed Daemon. If several are installed, they fail and list them, so you never act on the wrong one.
+When no project resolves, for example outside any repository, they use the only installed Daemon. If several are installed, they fail and list them, so you never act on the wrong one. `stop --all`, `restart --all` and `uninstall --all` act on every installed Daemon instead, from anywhere, and name each one:
+
+```sh
+linear-t3 stop --all
+```
 
 `start` refuses to run from the npx cache, because npm may clean it up and leave the service pointing at nothing. Install it first with `npm i -g linear-t3`.
 

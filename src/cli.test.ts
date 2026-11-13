@@ -2343,7 +2343,7 @@ interface ServiceSetup {
   env: Record<string, string>;
   /** The repository `start` runs in, holding the Local Config. */
   dir: string;
-  files: { config: string; local: string; credentials: string; unit: string };
+  files: { config: string; local: string; credentials: string; state: string; unit: string };
   cli: (...args: string[]) => ReturnType<typeof startCli>["result"];
   /** Every call the stand-in service manager got. */
   calls: () => string[];
@@ -2357,6 +2357,8 @@ interface ServiceSetup {
   markRunning: () => void;
   /** Says the service is running as the process that asks, as when the Daemon is the one asking. */
   markRunningAsCaller: () => void;
+  /** Says T3 project `project`'s Daemon is running or stopped, whatever `markRunning` said. */
+  markDaemon: (project: string, running: boolean) => void;
   resetCalls: () => void;
   /** The unit file of T3 project `project`'s Daemon. */
   unitOf: (project: string) => string;
@@ -2371,6 +2373,8 @@ interface ServiceSetup {
   makeLegacy: (pinned: boolean) => void;
   /** Whether a call started T3 project `project`'s Daemon. */
   started: (project: string) => boolean;
+  /** T3 project `project`'s Daemon's log file, where it writes one. */
+  logOf?: (project: string) => string;
 }
 
 /** Undoes a unit file's escaping of one quoted word; ExecStart words also doubled `$`. */
@@ -2661,16 +2665,16 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
     expect((await cli("start")).status).toBe(0);
     const result = await startCli({ cwd: tmpdir(), env }, ["status"]).result;
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('Project:       "my-app" (project-1)\n');
+    expect(result.stdout).toContain('\nDaemon for "my-app" (project-1)\n');
     expect(result.stdout).toContain(`Global Config: ${files.config}\n`);
-    expect(result.stdout).toContain(`Local Config:  ${files.local}\n`);
+    expect(result.stdout).toContain(`  Local Config:  ${files.local}\n`);
   });
 
   test("status says when no Local Config is pinned", async () => {
     const { files, cli } = await service();
     rmSync(files.local);
     expect((await cli("start", "--team", "ENG")).status).toBe(0);
-    expect((await cli("status")).stdout).toContain("Local Config:  none\n");
+    expect((await cli("status")).stdout).toContain("  Local Config:  none\n");
   });
 
   test("the unit never holds the tokens, from the environment or the Credentials", async () => {
@@ -2740,18 +2744,22 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
     expect(result.stdout).not.toMatch(ALREADY_RUNNING);
   });
 
-  test.each(["stop", "restart", "logs", "uninstall"])(
-    "%s when the service isn't installed says so and exits non-zero",
-    async (command) => {
-      const { cli, calls } = await service();
-      const result = await cli(command);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
-        "The Daemon isn't installed as a background service; run `linear-t3 start`",
-      );
-      expect(calls()).toEqual([]);
-    },
-  );
+  test.each([
+    ["stop"],
+    ["restart"],
+    ["logs"],
+    ["uninstall"],
+    ["stop", "--all"],
+    ["uninstall", "--all"],
+  ])("%s %s when the service isn't installed says so and exits non-zero", async (...command) => {
+    const { cli, calls } = await service();
+    const result = await cli(...command);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "The Daemon isn't installed as a background service; run `linear-t3 start`",
+    );
+    expect(calls()).toEqual([]);
+  });
 
   // Each test runs the CLI several times, against T3.
   describe("with a Daemon per T3 project", { timeout: 30_000 }, () => {
@@ -2848,7 +2856,7 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
       },
     );
 
-    test.each(["stop", "restart", "logs", "uninstall", "status"])(
+    test.each(["stop", "restart", "logs", "uninstall"])(
       "%s with several Daemons and no project resolving here fails and lists them",
       async (command) => {
         const setup = await twoDaemons();
@@ -2874,12 +2882,101 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
       expect(setup.calls()).toEqual([]);
     });
 
-    test("status shows the Daemon of the working directory's project, by title and id", async () => {
+    test("status lists every Daemon, running or stopped, from any directory, with the shared paths once", async () => {
       const setup = await twoDaemons();
-      const result = await setup.cliIn(setup.other, "status");
+      setup.markDaemon("project-1", true);
+      setup.markDaemon("project-2", false);
+      const result = await setup.cliIn(tmpdir(), "status");
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      const blocks = result.stdout.trimEnd().split("\n\n");
+      expect(blocks[0]!.split("\n")).toEqual([
+        `Global Config: ${setup.files.config}`,
+        `Credentials:   ${setup.files.credentials}`,
+        `State:         ${setup.files.state}`,
+      ]);
+      const [first, second] = [blocks[1]!.split("\n"), blocks[2]!.split("\n")];
+      expect(first[0]).toBe('Daemon for "my-app" (project-1)');
+      expect(first[1]).toMatch(
+        new RegExp(`^  Status:        running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
+      );
+      expect(first.slice(2)).toContain(`  Local Config:  ${setup.files.local}`);
+      expect(first.slice(2)).toContain(`  Unit:          ${setup.files.unit}`);
+      expect(second.slice(0, 3)).toEqual([
+        'Daemon for "other" (project-2)',
+        "  Status:        stopped",
+        `  Local Config:  ${join(setup.other, LOCAL)}`,
+      ]);
+      expect(second).toContain(`  Unit:          ${setup.unitOf("project-2")}`);
+      for (const shared of ["Global Config:", "Credentials:", "State:"]) {
+        expect(result.stdout.split(shared)).toHaveLength(2);
+      }
+    });
+
+    test("status shows the ids alone when T3 can't say the titles", async () => {
+      const setup = await twoDaemons();
+      const config = JSON.parse(readFileSync(setup.files.config, "utf8")) as object;
+      writeFile(setup.files.config, JSON.stringify({ ...config, t3Url: "http://127.0.0.1:1" }));
+      const result = await setup.cliIn(tmpdir(), "status");
       expect(result.status).toBe(0);
-      expect(result.stdout).toContain('Project:       "other" (project-2)\n');
-      expect(result.stdout).toContain(`Unit:          ${setup.unitOf("project-2")}\n`);
+      expect(result.stdout).toContain("\nDaemon for project-1\n");
+      expect(result.stdout).toContain("\nDaemon for project-2\n");
+    });
+
+    test("status warns about a missing node for the Daemon that runs it", async () => {
+      const setup = await twoDaemons();
+      const gone = join(tmpdir(), "linear-t3-gone", "node");
+      const unit = setup.unitOf("project-2");
+      writeFileSync(unit, readFileSync(unit, "utf8").replace(process.execPath, gone));
+      const result = await setup.cliIn(tmpdir(), "status");
+      expect(result.status).toBe(0);
+      expect(result.stderr.trim()).toBe(
+        `The Daemon for "other" (project-2) runs ${gone}, which no longer exists; run \`linear-t3 start\` again to use this node`,
+      );
+    });
+
+    test.each(["stop", "restart", "uninstall"])(
+      "%s --all acts on every Daemon, from any directory, and names each",
+      async (command) => {
+        const setup = await twoDaemons();
+        const result = await setup.cliIn(tmpdir(), command, "--all");
+        expect(result).toMatchObject({ status: 0, stderr: "" });
+        expect(result.stdout).toContain('"my-app" (project-1)');
+        expect(result.stdout).toContain('"other" (project-2)');
+        expect(result.stdout.trimEnd().split("\n")).toHaveLength(2);
+        expect(setup.named()).toContain("project-1");
+        expect(setup.named()).toContain("project-2");
+      },
+    );
+
+    test("uninstall --all removes every unit and keeps the Config, Credentials, State and logs", async () => {
+      const setup = await twoDaemons();
+      writeFile(setup.files.state, "{}");
+      const logs = ["project-1", "project-2"].flatMap((project) => {
+        const log = setup.logOf?.(project);
+        if (log) writeFile(log, "old output\n");
+        return log ? [log] : [];
+      });
+      expect((await setup.cliIn(tmpdir(), "uninstall", "--all")).status).toBe(0);
+      expect(existsSync(setup.files.unit)).toBe(false);
+      expect(existsSync(setup.unitOf("project-2"))).toBe(false);
+      for (const kept of [
+        setup.files.config,
+        setup.files.credentials,
+        setup.files.state,
+        ...logs,
+      ]) {
+        expect(existsSync(kept)).toBe(true);
+      }
+      const after = await setup.cliIn(tmpdir(), "status");
+      expect(after.stdout).toContain("No background Daemons are installed");
+    });
+
+    test("--all with --project is refused before touching any Daemon", async () => {
+      const setup = await twoDaemons();
+      const result = await setup.cliIn(tmpdir(), "stop", "--all", "--project", "other");
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("--all");
+      expect(setup.calls()).toEqual([]);
     });
   });
 
@@ -2922,7 +3019,7 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
       expect(existsSync(setup.legacyUnit)).toBe(false);
       expect(units(setup)).toEqual([basename(setup.files.unit)]);
       expect(setup.started("project-1")).toBe(false);
-      expect(result.stdout).toContain("Daemon:        stopped\n");
+      expect(result.stdout).toContain("  Status:        stopped\n");
     });
 
     test("status removes an old unit pinned to no project and says to run start again", async () => {
@@ -3015,14 +3112,16 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
     writeFile(files.credentials, "LINEAR_API_KEY=lin-key\nT3_TOKEN=t3-tok\n");
     const bin = mkdtempSync(join(tmpdir(), "linear-t3-bin-"));
     const calls = join(bin, "calls");
-    const printed = join(bin, "printed");
+    const printedFile = join(bin, "printed");
     writeFileSync(
       join(bin, "launchctl"),
       [
         "#!/bin/sh",
         `echo "$*" >> "${calls}"`,
         'if [ "$1" = print ]; then',
-        `  if [ -f "${printed}" ]; then sed "s/@CALLER@/$PPID/" "${printed}"; exit 0; fi`,
+        `  one="${printedFile}.$(basename "$2")"`,
+        '  if [ -f "$one" ]; then sed "s/@CALLER@/$PPID/" "$one"; exit 0; fi',
+        `  if [ -f "${printedFile}" ]; then sed "s/@CALLER@/$PPID/" "${printedFile}"; exit 0; fi`,
         `  echo "Could not find service \\"linear-t3\\" in domain for user gui: ${uid}" >&2`,
         "  exit 113",
         "fi",
@@ -3041,9 +3140,14 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
       pinned: () => launchdPinned(readFileSync(files.unit, "utf8")),
       projects,
       linearFilters: () => linear.filters,
-      markRunning: () => writeFileSync(printed, runningPrint()),
-      markRunningAsCaller: () => writeFileSync(printed, callerPrint()),
-      print: (output: string) => writeFileSync(printed, output),
+      markRunning: () => writeFileSync(printedFile, runningPrint()),
+      markRunningAsCaller: () => writeFileSync(printedFile, callerPrint()),
+      markDaemon: (project: string, running: boolean) =>
+        writeFileSync(
+          `${printedFile}.linear-t3.${project}`,
+          printed(running ? `state = running\n\tpid = ${process.pid}` : "state = not running"),
+        ),
+      print: (output: string) => writeFileSync(printedFile, output),
       resetCalls: () => writeFileSync(calls, ""),
       unitOf: (project: string) =>
         join(home.HOME, "Library", "LaunchAgents", `linear-t3.${project}.plist`),
@@ -3232,14 +3336,21 @@ ${variables}\t</dict>
     }
   });
 
-  /** The lines `status` prints for where everything lives; the pinned ones once installed. */
-  const whereLines = (files: Record<string, string>, installed = true) => [
-    ...(installed ? ['Project:       "my-app" (project-1)'] : []),
+  /** The lines `status` prints: the shared paths, then the Daemon's block, its status `daemon`. */
+  const statusLines = (files: Record<string, string>, daemon?: string) => [
     `Global Config: ${files.config}`,
-    ...(installed ? [`Local Config:  ${files.local}`] : []),
     `Credentials:   ${files.credentials}`,
     `State:         ${files.state}`,
-    ...(installed ? [`Log:           ${files.log}`, `Unit:          ${files.unit}`] : []),
+    "",
+    ...(daemon === undefined
+      ? ["No background Daemons are installed; run `linear-t3 start` in a repository"]
+      : [
+          'Daemon for "my-app" (project-1)',
+          `  Status:        ${daemon}`,
+          `  Local Config:  ${files.local}`,
+          `  Log:           ${files.log}`,
+          `  Unit:          ${files.unit}`,
+        ]),
   ];
 
   test("status shows a running Daemon's pid and uptime, and where everything lives", async () => {
@@ -3247,10 +3358,10 @@ ${variables}\t</dict>
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     const lines = result.stdout.trimEnd().split("\n");
-    expect(lines[0]).toMatch(
-      new RegExp(`^Daemon:        running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
+    expect(lines[5]).toMatch(
+      new RegExp(`^  Status:        running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
     );
-    expect(lines.slice(1)).toEqual(whereLines(files));
+    expect(lines).toEqual(statusLines(files, lines[5]!.slice(17)));
   });
 
   test.each(["stopped", "unloaded"] as const)(
@@ -3259,10 +3370,7 @@ ${variables}\t</dict>
       const { files, cli } = await installed(state);
       const result = await cli("status");
       expect(result).toMatchObject({ status: 0, stderr: "" });
-      expect(result.stdout.trimEnd().split("\n")).toEqual([
-        "Daemon:        stopped",
-        ...whereLines(files),
-      ]);
+      expect(result.stdout.trimEnd().split("\n")).toEqual(statusLines(files, "stopped"));
     },
   );
 
@@ -3270,10 +3378,7 @@ ${variables}\t</dict>
     const { files, cli, calls } = await service();
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
-    expect(result.stdout.trimEnd().split("\n")).toEqual([
-      "Daemon:        not installed, run `linear-t3 start`",
-      ...whereLines(files, false),
-    ]);
+    expect(result.stdout.trimEnd().split("\n")).toEqual(statusLines(files));
     expect(calls()).toEqual([]);
   });
 
@@ -3300,7 +3405,7 @@ ${variables}\t</dict>
     const result = await cli("status");
     expect(result.status).toBe(0);
     expect(result.stderr).toContain(
-      `The Daemon runs ${gone}, which no longer exists; run \`linear-t3 start\` again to use this node`,
+      `The Daemon for "my-app" (project-1) runs ${gone}, which no longer exists; run \`linear-t3 start\` again to use this node`,
     );
   });
 
@@ -3389,7 +3494,10 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
       );
     stub(
       "systemctl",
+      // `failOn` makes every call that names a unit fail.
+      `if [ -f "${bin}/fail.$3" ] || [ -f "${bin}/fail.$4" ]; then echo "unit is broken" >&2; exit 1; fi`,
       'if [ "$2" = show ]; then',
+      `  if [ -f "${shown}.$3" ]; then sed "s/@CALLER@/$PPID/" "${shown}.$3"; exit 0; fi`,
       `  if [ -f "${shown}" ]; then sed "s/@CALLER@/$PPID/" "${shown}"; exit 0; fi`,
       '  printf "MainPID=0\\nActiveState=inactive\\nSubState=dead\\n"',
       "fi",
@@ -3417,8 +3525,17 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
         writeFileSync(shown, `MainPID=${process.pid}\nActiveState=active\nSubState=running\n`),
       markRunningAsCaller: () =>
         writeFileSync(shown, "MainPID=@CALLER@\nActiveState=active\nSubState=running\n"),
+      markDaemon: (project: string, running: boolean) =>
+        writeFileSync(
+          `${shown}.linear-t3-${project}.service`,
+          running
+            ? `MainPID=${process.pid}\nActiveState=active\nSubState=running\n`
+            : "MainPID=0\nActiveState=inactive\nSubState=dead\n",
+        ),
       show: (output: string) => writeFileSync(shown, output),
       enableLinger: () => writeFileSync(linger, ""),
+      failOn: (project: string) =>
+        writeFileSync(join(bin, `fail.linear-t3-${project}.service`), ""),
       resetCalls: () => writeFileSync(calls, ""),
       unitOf: (project: string) =>
         join(home.XDG_CONFIG_HOME, "systemd", "user", `linear-t3-${project}.service`),
@@ -3627,16 +3744,21 @@ WantedBy=default.target
   const lingerHint =
     "The Daemon only runs while you're logged in. To keep it running after you log out, run `loginctl enable-linger`";
 
-  /** The lines `status` prints for where everything lives; the pinned ones once installed. */
-  const whereLines = (files: Record<string, string>, installed = true) => [
-    ...(installed ? ['Project:       "my-app" (project-1)'] : []),
+  /** The lines `status` prints: the shared paths, then the Daemon's block, its status `daemon`. */
+  const statusLines = (files: Record<string, string>, daemon?: string) => [
     `Global Config: ${files.config}`,
-    ...(installed ? [`Local Config:  ${files.local}`] : []),
     `Credentials:   ${files.credentials}`,
     `State:         ${files.state}`,
-    ...(installed
-      ? ["Log:           journalctl --user -u linear-t3-project-1", `Unit:          ${files.unit}`]
-      : []),
+    "",
+    ...(daemon === undefined
+      ? ["No background Daemons are installed; run `linear-t3 start` in a repository"]
+      : [
+          'Daemon for "my-app" (project-1)',
+          `  Status:        ${daemon}`,
+          `  Local Config:  ${files.local}`,
+          "  Log:           journalctl --user -u linear-t3-project-1",
+          `  Unit:          ${files.unit}`,
+        ]),
   ];
 
   test("status shows a running Daemon's pid and uptime, where everything lives, and the linger hint", async () => {
@@ -3644,10 +3766,10 @@ WantedBy=default.target
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     const lines = result.stdout.trimEnd().split("\n");
-    expect(lines[0]).toMatch(
-      new RegExp(`^Daemon:        running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
+    expect(lines[5]).toMatch(
+      new RegExp(`^  Status:        running \\(pid ${process.pid}, up [\\d:-]+\\)$`),
     );
-    expect(lines.slice(1)).toEqual([...whereLines(files), "", lingerHint]);
+    expect(lines).toEqual([...statusLines(files, lines[5]!.slice(17)), "", lingerHint]);
     expect(calls()).toEqual([
       "systemctl --user show linear-t3-project-1.service --property=ActiveState,SubState,MainPID",
       `loginctl show-user ${uid} --property=Linger --value`,
@@ -3659,8 +3781,7 @@ WantedBy=default.target
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(result.stdout.trimEnd().split("\n")).toEqual([
-      "Daemon:        stopped",
-      ...whereLines(files),
+      ...statusLines(files, "stopped"),
       "",
       lingerHint,
     ]);
@@ -3670,7 +3791,8 @@ WantedBy=default.target
     const { files, cli, calls, enableLinger } = await installed("running");
     enableLinger();
     const result = await cli("status");
-    expect(result.stdout.trimEnd().split("\n").slice(1)).toEqual(whereLines(files));
+    const lines = result.stdout.trimEnd().split("\n");
+    expect(lines).toEqual(statusLines(files, lines[5]!.slice(17)));
     expect(calls().filter((call) => call.startsWith("loginctl"))).toEqual([
       `loginctl show-user ${uid} --property=Linger --value`,
     ]);
@@ -3680,11 +3802,34 @@ WantedBy=default.target
     const { files, cli, calls } = await service();
     const result = await cli("status");
     expect(result).toMatchObject({ status: 0, stderr: "" });
-    expect(result.stdout.trimEnd().split("\n")).toEqual([
-      "Daemon:        not installed, run `linear-t3 start`",
-      ...whereLines(files, false),
-    ]);
+    expect(result.stdout.trimEnd().split("\n")).toEqual(statusLines(files));
     expect(calls()).toEqual([]);
+  });
+
+  test("status with several Daemons shows the linger hint once, at the end", async () => {
+    const setup = await service();
+    const other = repoDir({ project: undefined });
+    setup.projects.push({ id: "project-2", title: "other", workspaceRoot: other });
+    expect((await setup.cli("start")).status).toBe(0);
+    expect((await startCli({ cwd: other, env: setup.env }, ["start"]).result).status).toBe(0);
+    const { stdout } = await startCli({ cwd: tmpdir(), env: setup.env }, ["status"]).result;
+    expect(stdout.split(lingerHint)).toHaveLength(2);
+    expect(stdout.trimEnd().endsWith(`\n\n${lingerHint}`)).toBe(true);
+  });
+
+  test("stop --all keeps going past a Daemon that fails, names it, and exits 1", async () => {
+    const setup = await service();
+    const other = repoDir({ project: undefined });
+    setup.projects.push({ id: "project-2", title: "other", workspaceRoot: other });
+    expect((await setup.cli("start")).status).toBe(0);
+    expect((await startCli({ cwd: other, env: setup.env }, ["start"]).result).status).toBe(0);
+    setup.failOn("project-1");
+    setup.resetCalls();
+    const result = await startCli({ cwd: tmpdir(), env: setup.env }, ["stop", "--all"]).result;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('The Daemon for "my-app" (project-1) failed:');
+    expect(result.stdout).toContain('Stopped the Daemon for "other" (project-2)');
+    expect(setup.calls()).toContain("systemctl --user disable --now linear-t3-project-2.service");
   });
 
   test("status reads the Local Config a unit passes as `--config <path>`, as before projects were pinned", async () => {
@@ -3697,8 +3842,8 @@ WantedBy=default.target
       ),
     );
     const { stdout } = await cli("status");
-    expect(stdout).toContain('Project:       "my-app" (project-1)\n');
-    expect(stdout).toContain(`Local Config:  ${files.local}\n`);
+    expect(stdout).toContain('\nDaemon for "my-app" (project-1)\n');
+    expect(stdout).toContain(`  Local Config:  ${files.local}\n`);
   });
 
   test("status warns when the node binary the unit runs no longer exists", async () => {
@@ -3711,7 +3856,7 @@ WantedBy=default.target
     const result = await cli("status");
     expect(result.status).toBe(0);
     expect(result.stderr).toContain(
-      `The Daemon runs ${gone}, which no longer exists; run \`linear-t3 start\` again to use this node`,
+      `The Daemon for "my-app" (project-1) runs ${gone}, which no longer exists; run \`linear-t3 start\` again to use this node`,
     );
   });
 
