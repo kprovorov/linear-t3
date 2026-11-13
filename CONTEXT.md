@@ -6,7 +6,7 @@ Watches Linear for issues that match a project's filters and starts a T3 Code th
 
 **Daemon**:
 The process that polls Linear and launches threads for one T3 project. It keeps polling until stopped, or polls once when asked.
-_Avoid_: service, worker, bot
+_Avoid_: service, worker, bot, watcher
 
 **Integration**:
 An external system linear-t3 connects to with a token: T3 Code or Linear.
