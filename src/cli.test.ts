@@ -2355,6 +2355,8 @@ interface ServiceSetup {
   linearFilters: () => unknown[];
   /** Says the service is running, so commands that act on a running service can be checked. */
   markRunning: () => void;
+  /** Says the service is running as the process that asks, as when the Daemon is the one asking. */
+  markRunningAsCaller: () => void;
   resetCalls: () => void;
   /** The unit file of T3 project `project`'s Daemon. */
   unitOf: (project: string) => string;
@@ -2681,6 +2683,63 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
     expect(unit).not.toContain("t3-tok");
   });
 
+  const ALREADY_RUNNING =
+    /T3 project "my-app" \(project-1\) already has a background Daemon running/;
+
+  test.each([["--once"], ["--dry-run"]])(
+    "run %s warns when the project's background Daemon is running, then polls as usual",
+    async (flag) => {
+      const setup = await service();
+      expect((await setup.cli("start")).status).toBe(0);
+      setup.markRunning();
+      const result = await setup.cli("run", flag);
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(result.stdout).toMatch(ALREADY_RUNNING);
+      expect(result.stdout).toContain("`linear-t3 stop --project project-1`");
+      // The warning comes before the first poll.
+      expect(result.stdout.search(ALREADY_RUNNING)).toBeLessThan(
+        result.stdout.indexOf("watching ENG -> my-app"),
+      );
+      expect(setup.linearFilters()).toHaveLength(1);
+    },
+  );
+
+  test("run doesn't warn when the project's Daemon is stopped", async () => {
+    const setup = await service();
+    expect((await setup.cli("start")).status).toBe(0);
+    const result = await setup.cli("run", "--once");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).not.toMatch(ALREADY_RUNNING);
+  });
+
+  test("run doesn't warn, or ask the service manager, when the project has no Daemon", async () => {
+    const setup = await service();
+    const result = await setup.cli("run", "--once");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).not.toMatch(ALREADY_RUNNING);
+    expect(setup.calls()).toEqual([]);
+  });
+
+  test("run doesn't warn about another project's running Daemon", async () => {
+    const setup = await service();
+    setup.projects.push({ id: "project-2", title: "other", workspaceRoot: "/work/other" });
+    expect((await setup.cli("start", "--project", "other")).status).toBe(0);
+    setup.markRunning();
+    const result = await setup.cli("run", "--once");
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).not.toContain("already has a background Daemon running");
+  });
+
+  test("the installed Daemon doesn't warn about itself", async () => {
+    const setup = await service();
+    expect((await setup.cli("start")).status).toBe(0);
+    setup.markRunningAsCaller();
+    const result = await runPinned(setup, tmpdir());
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(result.stdout).toContain("watching ENG -> my-app");
+    expect(result.stdout).not.toMatch(ALREADY_RUNNING);
+  });
+
   test.each(["stop", "restart", "logs", "uninstall"])(
     "%s when the service isn't installed says so and exits non-zero",
     async (command) => {
@@ -2963,7 +3022,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
         "#!/bin/sh",
         `echo "$*" >> "${calls}"`,
         'if [ "$1" = print ]; then',
-        `  if [ -f "${printed}" ]; then cat "${printed}"; exit 0; fi`,
+        `  if [ -f "${printed}" ]; then sed "s/@CALLER@/$PPID/" "${printed}"; exit 0; fi`,
         `  echo "Could not find service \\"linear-t3\\" in domain for user gui: ${uid}" >&2`,
         "  exit 113",
         "fi",
@@ -2983,6 +3042,7 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
       projects,
       linearFilters: () => linear.filters,
       markRunning: () => writeFileSync(printed, runningPrint()),
+      markRunningAsCaller: () => writeFileSync(printed, callerPrint()),
       print: (output: string) => writeFileSync(printed, output),
       resetCalls: () => writeFileSync(calls, ""),
       unitOf: (project: string) =>
@@ -3019,6 +3079,8 @@ describe.runIf(process.platform === "darwin")("cli background service on macOS",
   const printed = (details: string) =>
     `${target} = {\n\tactive count = 1\n\tpath = /x/linear-t3.project-1.plist\n\t${details}\n}\n`;
   const runningPrint = () => printed(`state = running\n\tpid = ${process.pid}`);
+  // The stand-in `launchctl` puts the pid of whoever called it in place of `@CALLER@`.
+  const callerPrint = () => printed("state = running\n\tpid = @CALLER@");
 
   /** The agent `start` should write for `files`, with `env` as its environment. */
   function expectedAgent(files: { local: string; log: string }, env: Record<string, string>) {
@@ -3328,7 +3390,7 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
     stub(
       "systemctl",
       'if [ "$2" = show ]; then',
-      `  if [ -f "${shown}" ]; then cat "${shown}"; exit 0; fi`,
+      `  if [ -f "${shown}" ]; then sed "s/@CALLER@/$PPID/" "${shown}"; exit 0; fi`,
       '  printf "MainPID=0\\nActiveState=inactive\\nSubState=dead\\n"',
       "fi",
     );
@@ -3353,6 +3415,8 @@ describe.runIf(process.platform === "linux")("cli background service on Linux", 
       linearFilters: () => linear.filters,
       markRunning: () =>
         writeFileSync(shown, `MainPID=${process.pid}\nActiveState=active\nSubState=running\n`),
+      markRunningAsCaller: () =>
+        writeFileSync(shown, "MainPID=@CALLER@\nActiveState=active\nSubState=running\n"),
       show: (output: string) => writeFileSync(shown, output),
       enableLinger: () => writeFileSync(linger, ""),
       resetCalls: () => writeFileSync(calls, ""),

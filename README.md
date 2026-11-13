@@ -60,6 +60,8 @@ Both write the Credentials file with mode `0600` and leave every other line alon
 
 `run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment, else from the Credentials file (see [Files](#files)). Before the first poll it checks everything: the Config, the T3 project, the team's status and label names, the model and the default branch. Any problem exits 1. On SIGINT or SIGTERM it lets the current launch finish and starts nothing new; threads already launched keep running.
 
+If the T3 project's [background Daemon](#background-service) is running too, `run` logs a warning naming it before the first poll, then polls as usual. Running both is safe, since T3 won't launch an issue twice and they share State when they use the same State file, but it's rarely meant: `linear-t3 stop --project <id>` stops the background one. The warning doesn't change the exit code, and the background Daemon never warns about itself.
+
 Besides a flag for every [Config key](#config-keys), `run` takes:
 
 | Flag              | What it does                                                                                                                                 |
