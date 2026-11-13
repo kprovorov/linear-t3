@@ -16,6 +16,7 @@ import {
 } from "./linear.ts";
 import type { Paths } from "./paths.ts";
 import { findProject } from "./project.ts";
+import { otherRunningDaemon } from "./service.ts";
 import { StateStore, type LaunchRecord } from "./state.ts";
 import {
   T3Client,
@@ -680,6 +681,14 @@ export async function runDaemon({
           : `${key}: unused with workspace local`,
       );
     }
+  }
+  const background = await otherRunningDaemon(paths, project.id);
+  if (background) {
+    // Running both is safe, as T3 won't launch an issue twice and they usually share State, but
+    // it's rarely meant.
+    log(
+      `warning: T3 project "${project.title}" (${project.id}) already has a background Daemon running (${background.kind} ${background.unitPath}, pid ${background.pid}); both will poll it. If that wasn't intended, run \`linear-t3 stop --project ${project.id}\``,
+    );
   }
   log(`watching ${config.team} -> ${project.title}`);
   const watched = { project };

@@ -153,6 +153,28 @@ export async function migrateLegacy(platform: ServicePlatform): Promise<string |
   return `Moved the old background service (${old.unitPath}) to the Daemon for T3 project ${project} (${manager.unitPath})${running ? "" : ", left stopped"}`;
 }
 
+/**
+ * The background Daemon of T3 project `project` when it's installed and running as another
+ * process than this one. The background Daemon is itself a `run`, so it never finds itself. With
+ * no service manager to ask, or one that can't say, there's none.
+ */
+export async function otherRunningDaemon(
+  paths: Paths,
+  project: string,
+): Promise<{ kind: string; unitPath: string; pid: number } | undefined> {
+  try {
+    const manager = servicePlatform(paths).daemon(project);
+    if (!manager.installed()) return undefined;
+    const { running, pid } = await manager.status();
+    if (!running || pid === undefined || pid === process.pid) return undefined;
+    return { kind: manager.kind, unitPath: manager.unitPath, pid };
+  } catch (error) {
+    // Only a warning hangs on this, so a service manager that can't say never stops the run.
+    if (error instanceof ServiceError) return undefined;
+    throw error;
+  }
+}
+
 /** What `start` pins the Daemon to, so it runs the same from any working directory. */
 export interface Pinned {
   /** The T3 project's id. */
