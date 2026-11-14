@@ -5,7 +5,7 @@
 A small Daemon that polls Linear for issues that match your filters and starts a [T3 Code](https://t3.codes) thread for each one. It runs on the same machine as the T3 Code server.
 
 - Each run watches one Linear team and launches into one T3 project: the one you name, or the current repository's.
-- Filters (status, label, assignee, priority, or any raw Linear filter) pick which issues get a thread.
+- Filters (status, label, excluded label, assignee, priority, or any raw Linear filter) pick which issues get a thread.
 - After a thread starts, the Daemon moves the issue to `In Progress` and comments with the thread link. Both can be turned off.
 - Model, runtime mode, worktree settings and base branch default to what you already chose in T3.
 - Launched issues are recorded in the State file, so restarting the Daemon never starts the same issue twice.
@@ -58,7 +58,7 @@ Both write the Credentials file with mode `0600` and leave every other line alon
 
 ### `run`
 
-`run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment, else from the Credentials file (see [Files](#files)). Before the first poll it checks everything: the Config, the T3 project, the team's status and label names, the model and the default branch. Any problem exits 1. On SIGINT or SIGTERM it lets the current launch finish and starts nothing new; threads already launched keep running.
+`run` reads `LINEAR_API_KEY` and `T3_TOKEN` from the environment, else from the Credentials file (see [Files](#files)). Before the first poll it checks everything: the Config, the T3 project, the team's status, label and excluded label names, the model and the default branch. Any problem exits 1. On SIGINT or SIGTERM it lets the current launch finish and starts nothing new; threads already launched keep running.
 
 If the T3 project's [background Daemon](#background-service) is running too, `run` logs a warning naming it before the first poll, then polls as usual. Running both is safe, since T3 won't launch an issue twice and they share State when they use the same State file, but it's rarely meant: `linear-t3 stop --project <id>` stops the background one. The warning doesn't change the exit code, and the background Daemon never warns about itself.
 
@@ -91,7 +91,7 @@ Each key resolves on its own, highest first:
 4. The T3 project's own setting, or T3's global setting, for keys T3 has one for.
 5. The built-in default.
 
-A key a layer doesn't set falls through to the next one. A list set in a higher layer replaces the lower one, so `--status Backlog` means exactly "status Backlog". `label` is the exception: every layer's labels add up, so `"label": "mac"` in the Global Config, `"label": "ready-for-agent"` in the Local Config and `--label bug` watch issues that carry all three. `--config` replaces the discovered Local Config; it doesn't add to it.
+A key a layer doesn't set falls through to the next one. A list set in a higher layer replaces the lower one, so `--status Backlog` means exactly "status Backlog". `label` and `excludeLabel` are the exceptions: every layer's labels add up, so `"label": "mac"` in the Global Config, `"label": "ready-for-agent"` in the Local Config and `--label bug` watch issues that carry all three. Likewise `"excludeLabel": "windows-only"` in the Global Config and `--exclude-label wip` skip issues that carry either one; a one-off `--exclude-label` never drops the machine's exclusions. `--config` replaces the discovered Local Config; it doesn't add to it.
 
 Booleans take `true` or `false`, and a bare flag means `true` (`--comment` is `--comment true`). List keys take a string or an array in a file, and a repeated flag on the CLI (`--status Todo --status Backlog`). `--filter` takes JSON.
 
@@ -150,6 +150,7 @@ The nearest `linear-t3.config.json` from the working directory up to the Git roo
 | `filter`            | `--filter <json>`                   | local  | none                                                                                 |
 | `status`            | `--status <status>`                 | local  | any status                                                                           |
 | `label`             | `--label <label>`                   | all    | any labels                                                                           |
+| `excludeLabel`      | `--exclude-label <label>`           | all    | no labels                                                                            |
 | `assignee`          | `--assignee <assignee>`             | local  | anyone                                                                               |
 | `priority`          | `--priority <priority>`             | local  | any priority                                                                         |
 | `setStatus`         | `--set-status <status\|false>`      | local  | In Progress                                                                          |
@@ -173,6 +174,7 @@ What each one does:
 - **`filter`**: a raw Linear [`IssueFilter`](https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/inputs/IssueFilter), ANDed with the team and the named filters below. Use it for anything they don't cover, such as `{ "hasBlockedByRelations": { "eq": false } }`.
 - **`status`**: workflow statuses of the team; an issue must be in any of them. Names match ignoring case.
 - **`label`**: labels of the team; an issue must carry all of them. Names match ignoring case. Labels from the CLI, the Local Config and the Global Config add up, so a label in the Global Config, such as one for this machine, applies to every run on it.
+- **`excludeLabel`**: labels of the team that rule an issue out; an issue that carries any of them gets no thread. Issues with no labels still match. Names match ignoring case, and excluded labels from the CLI, the Local Config and the Global Config add up, so the Global Config can skip labels such as `ready-for-human` on every run on this machine. Exclusion only decides which issues are picked up: an issue that gains an excluded label keeps the thread it already has.
 - **`assignee`**: `me` (the owner of the Linear API key), an email address, or `none` for unassigned issues.
 - **`priority`**: `urgent`, `high`, `medium`, `low`, or `1` to `4`. Matches that priority or anything more urgent, so `high` also picks up urgent issues. Issues with no priority never match.
 - **`setStatus`**: the team's workflow status to move an issue to once its thread starts, or `false` to leave it alone.
@@ -188,7 +190,7 @@ What each one does:
 - **`t3Url`**: the T3 Code server.
 - **`stateFile`**: where State is kept, relative to the Global Config's folder. Every Daemon on the machine can share it: each write takes a lock (`<stateFile>.lock`) and merges its record into the file, and each Daemon rereads it every poll.
 
-Status, label and `setStatus` names are checked against the team before the first poll, including the `In Progress` default, so a typo fails fast instead of matching nothing.
+Status, label, `excludeLabel` and `setStatus` names are checked against the team before the first poll, including the `In Progress` default, so a typo fails fast instead of matching nothing. An excluded label set in the Global Config must exist in every team you watch on the machine.
 
 ### Defaults from T3
 
