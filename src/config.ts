@@ -125,6 +125,16 @@ export const KEYS = {
     arg: "<label>",
     defaultText: "any labels",
   }),
+  excludeLabel: declare({
+    type: "list",
+    scope: "all",
+    schema: list,
+    merges: true,
+    description:
+      "a label of the team that rules an issue out; repeat it to skip issues that carry any of several. Adds to the excluded labels in the Config files",
+    arg: "<label>",
+    defaultText: "no labels",
+  }),
   assignee: declare({
     type: "string",
     scope: "local",
@@ -278,6 +288,8 @@ export interface Config {
   status?: string[];
   /** Label names, matched ignoring case; an issue must carry all of them. */
   label?: string[];
+  /** Label names, matched ignoring case; an issue that carries any of them is skipped. */
+  excludeLabel?: string[];
   /** `me`, `none` or an email address. */
   assignee?: string;
   /** 1 (Urgent) to 4 (Low); issues at this priority or a more urgent one match. */
@@ -514,7 +526,7 @@ export async function loadProjectConfig(
 
 /**
  * The effective Config: per key, the CLI flags, else the Local Config, else the Global Config,
- * else the built-in default. Keys T3's settings default are left unset for the Daemon to fill in. A value replaces the lower one whole, except a `merges` list (`label`), which adds every layer's items.
+ * else the built-in default. Keys T3's settings default are left unset for the Daemon to fill in. A value replaces the lower one whole, except a `merges` list (`label`, `excludeLabel`), which adds every layer's items.
  */
 export async function loadConfig(sources: ConfigSources): Promise<Config> {
   const { global: globalPath, cwd, defaultState } = sources;
@@ -561,6 +573,7 @@ export async function loadConfig(sources: ConfigSources): Promise<Config> {
     team: required("team"),
     status: get("status"),
     label: get("label"),
+    excludeLabel: get("excludeLabel"),
     assignee: get("assignee"),
     priority: get("priority"),
     filter: get("filter"),

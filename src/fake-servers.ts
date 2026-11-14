@@ -43,13 +43,16 @@ export const FAKE_VIEWER = { id: "user-1", name: "Ada", email: "ada@example.com"
 
 class UnsupportedFilter extends Error {}
 
-/** One field's comparator: `{ eq }`, `{ eqIgnoreCase }` or `{ in }`, nothing else. */
+/** One field's comparator: `{ eq }`, `{ eqIgnoreCase }`, `{ neqIgnoreCase }` or `{ in }`, nothing else. */
 function compare(value: string, comparator: unknown, path: string): boolean {
   const entries = Object.entries(comparator as Record<string, unknown>);
   return entries.every(([op, operand]) => {
     if (op === "eq") return value === operand;
     if (op === "eqIgnoreCase" && typeof operand === "string") {
       return value.toLowerCase() === operand.toLowerCase();
+    }
+    if (op === "neqIgnoreCase" && typeof operand === "string") {
+      return value.toLowerCase() !== operand.toLowerCase();
     }
     if (op === "in" && Array.isArray(operand)) return operand.includes(value);
     throw new UnsupportedFilter(`${path}.${op}`);
@@ -85,15 +88,12 @@ function matches(issue: FakeIssue, filter: unknown, statuses: FakeStatus[]): boo
       }
       case "labels":
         return Object.entries(criteria).every(([key, labelFilter]) => {
-          if (key !== "some") throw new UnsupportedFilter(`labels.${key}`);
-          return (issue.labels ?? []).some((label) =>
-            Object.entries(labelFilter as Record<string, unknown>).every(
-              ([labelKey, comparator]) => {
-                if (labelKey !== "name") throw new UnsupportedFilter(`labels.some.${labelKey}`);
-                return compare(label, comparator, "labels.some.name");
-              },
-            ),
-          );
+          const labels = issue.labels ?? [];
+          const match = (label: string) => matchesLabel(label, labelFilter, `labels.${key}`);
+          // As in the Linear API, `every` holds for an issue with no labels.
+          if (key === "some") return labels.some(match);
+          if (key === "every") return labels.every(match);
+          throw new UnsupportedFilter(`labels.${key}`);
         });
       case "assignee":
         return Object.entries(criteria).every(([key, comparator]) => {
@@ -119,6 +119,17 @@ function matches(issue: FakeIssue, filter: unknown, statuses: FakeStatus[]): boo
       default:
         throw new UnsupportedFilter(field);
     }
+  });
+}
+
+/** Whether a label named `label` matches a Linear `IssueLabelFilter` of `name` and `and`. */
+function matchesLabel(label: string, filter: unknown, path: string): boolean {
+  return Object.entries(filter as Record<string, unknown>).every(([key, value]) => {
+    if (key === "name") return compare(label, value, `${path}.name`);
+    if (key === "and") {
+      return (value as unknown[]).every((clause) => matchesLabel(label, clause, `${path}.and`));
+    }
+    throw new UnsupportedFilter(`${path}.${key}`);
   });
 }
 

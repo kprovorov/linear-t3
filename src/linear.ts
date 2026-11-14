@@ -97,10 +97,10 @@ function resolveNames(
 }
 
 /**
- * Checks `config`'s status, label and setStatus names against the team, ignoring case, and an
+ * Checks `config`'s status, label, excludeLabel and setStatus names against the team, ignoring case, and an
  * assignee email against the workspace's users, before the first poll. Returns `setStatus` as the
  * team spells it, and the `IssueFilter` for the team's issues that are in any of `status`, carry
- * all of `label`, have `assignee` (`me`, `none` or an email) and are at `priority` or more urgent,
+ * all of `label` and none of `excludeLabel`, have `assignee` (`me`, `none` or an email) and are at `priority` or more urgent,
  * ANDed with `filter`. The filter names statuses and labels rather than holding their ids, so one
  * deleted and made again still matches.
  */
@@ -110,6 +110,7 @@ export async function checkTeam(
     team,
     status,
     label,
+    excludeLabel,
     assignee,
     priority,
     filter,
@@ -118,6 +119,7 @@ export async function checkTeam(
     team: string;
     status?: string[];
     label?: string[];
+    excludeLabel?: string[];
     assignee?: string;
     priority?: number;
     filter?: Record<string, unknown>;
@@ -132,7 +134,7 @@ export async function checkTeam(
   const email = assignee !== "me" && assignee !== "none" ? assignee : undefined;
   const [statuses, labels, users] = await Promise.all([
     status !== undefined || setStatus !== false ? read("workflowStates", TEAM_STATUSES) : undefined,
-    label && read("issueLabels", TEAM_LABELS),
+    label || excludeLabel ? read("issueLabels", TEAM_LABELS) : undefined,
     email && readAll<{ id: string }>(client, "users", USERS_BY_EMAIL, { email }, signal),
   ]);
   // Every team has workflow statuses, so none means there's no such team.
@@ -144,10 +146,18 @@ export async function checkTeam(
   if (status && statuses) {
     clauses.push({ state: { name: { in: resolveNames(status, statuses, statusNames) } } });
   }
+  const labelNames = { one: "label", many: "labels", team };
   if (label && labels) {
-    for (const name of resolveNames(label, labels, { one: "label", many: "labels", team })) {
+    for (const name of resolveNames(label, labels, labelNames)) {
       clauses.push({ labels: { some: { name: { eqIgnoreCase: name } } } });
     }
+  }
+  if (excludeLabel && labels) {
+    // The Linear API holds `every` true for an issue with no labels, so those still match.
+    const names = resolveNames(excludeLabel, labels, labelNames);
+    clauses.push({
+      labels: { every: { and: names.map((name) => ({ name: { neqIgnoreCase: name } })) } },
+    });
   }
   if (assignee === "me") clauses.push({ assignee: { isMe: { eq: true } } });
   else if (assignee === "none") clauses.push({ assignee: { null: true } });

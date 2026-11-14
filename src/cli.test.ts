@@ -218,6 +218,7 @@ describe("cli", () => {
       ["--team <team>", "required", "local"],
       ["--status <status>", "default: any status", "local"],
       ["--label <label>", "default: any labels", "all"],
+      ["--exclude-label <label>", "default: no labels", "all"],
       ["--assignee <assignee>", "default: anyone", "local"],
       ["--priority <priority>", "default: any priority", "local"],
       ["--filter <json>", "default: none", "local"],
@@ -1039,6 +1040,121 @@ describe("cli run against fake Linear and T3", () => {
         expect(t3.launches).toEqual([]);
       },
     );
+  });
+
+  describe("excludeLabel", () => {
+    const queue: FakeIssue[] = [
+      { id: "i-1", identifier: "ENG-1", title: "Mac", status: "Todo", labels: ["mac"] },
+      { id: "i-2", identifier: "ENG-2", title: "Win", status: "Todo", labels: ["Windows-Only"] },
+      { id: "i-3", identifier: "ENG-3", title: "Human", status: "Backlog", labels: ["a", "human"] },
+      { id: "i-4", identifier: "ENG-4", title: "None", status: "Todo" },
+      { id: "i-5", identifier: "ENG-5", title: "A", status: "Todo", labels: ["a", "mac"] },
+    ];
+    const labels = ["mac", "Windows-Only", "Human", "a"];
+    const launched = (t3: { launches: Record<string, unknown>[] }) =>
+      t3.launches.map((launch) => String(launch.title).split(":")[0]).sort();
+
+    test("excludeLabel in the Global Config skips issues that carry it and launches the rest", async () => {
+      const global = { excludeLabel: ["windows-only"] };
+      const { t3, dir, env } = await servers({}, global, queue, {}, { labels });
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-1", "ENG-3", "ENG-4", "ENG-5"]);
+    });
+
+    test("an issue that carries any one of several excluded labels gets no thread, and one with no labels does", async () => {
+      const { t3, dir, env } = await servers({}, {}, queue, {}, { labels });
+      const result = await startCli({ cwd: dir, env }, [
+        "run",
+        "--once",
+        "--exclude-label",
+        "mac",
+        "--exclude-label",
+        "human",
+      ]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-2", "ENG-4"]);
+    });
+
+    test("exclusions from the Global Config, the Local Config and --exclude-label add up", async () => {
+      const { t3, dir, env } = await servers(
+        {},
+        { excludeLabel: "mac" },
+        queue,
+        { excludeLabel: ["human"] },
+        { labels },
+      );
+      const result = await startCli({ cwd: dir, env }, [
+        "run",
+        "--once",
+        "--exclude-label",
+        "windows-only",
+      ]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-4"]);
+    });
+
+    test("a label excluded in more than one layer counts once, ignoring case, and a file may give a string", async () => {
+      const { linear, t3, dir, env } = await servers(
+        {},
+        { excludeLabel: "MAC" },
+        queue,
+        { excludeLabel: "mac" },
+        { labels },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once", "--exclude-label", "Mac"])
+        .result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-2", "ENG-3", "ENG-4"]);
+      expect(JSON.stringify(linear.filters[0]).match(/neqIgnoreCase/g)).toHaveLength(1);
+    });
+
+    test("excludeLabel combines with label, status and filter: an issue must match all and carry no excluded label", async () => {
+      const { linear, t3, dir, env } = await servers(
+        {},
+        { excludeLabel: ["mac"] },
+        queue,
+        {
+          status: ["Todo", "Backlog"],
+          label: ["a"],
+          filter: { state: { type: { eq: "backlog" } } },
+        },
+        { labels },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result).toMatchObject({ status: 0, stderr: "" });
+      expect(launched(t3)).toEqual(["ENG-3"]);
+      expect(linear.filters).toEqual([
+        {
+          and: [
+            { team: { key: { eq: "ENG" } } },
+            { state: { name: { in: ["Todo", "Backlog"] } } },
+            { labels: { some: { name: { eqIgnoreCase: "a" } } } },
+            { labels: { every: { and: [{ name: { neqIgnoreCase: "mac" } }] } } },
+            { state: { type: { eq: "backlog" } } },
+          ],
+        },
+      ]);
+    });
+
+    test("an excluded name the team doesn't have fails before the first poll, listing the valid labels", async () => {
+      const { linear, t3, dir, env } = await servers(
+        {},
+        { excludeLabel: "linux" },
+        queue,
+        {},
+        {
+          labels,
+        },
+      );
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        'Team ENG has no label named "linux". Valid labels: a, Human, mac, Windows-Only',
+      );
+      expect(linear.filters).toEqual([]);
+      expect(t3.launches).toEqual([]);
+    });
   });
 
   describe("assignee and priority", () => {
@@ -2567,12 +2683,18 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
       "ready-for-agent",
       "--label",
       "mac",
+      "--exclude-label",
+      "windows-only",
+      "--exclude-label",
+      "ready-for-human",
     );
     expect(result).toMatchObject({ status: 0, stderr: "" });
     expect(setup.pinned().args.slice(6)).toEqual([
       "--status=Todo",
       "--label=ready-for-agent",
       "--label=mac",
+      "--exclude-label=windows-only",
+      "--exclude-label=ready-for-human",
     ]);
   });
 

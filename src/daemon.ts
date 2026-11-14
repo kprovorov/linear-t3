@@ -242,7 +242,7 @@ const needsT3Settings = (config: Config) =>
  * Before the first poll: the T3 project this run watches, `config` with `runtimeMode`,
  * `workspace` and `startFromOrigin` filled in from T3's settings where no layer set them, `model`
  * and `provider` resolved through T3's model catalog and `baseRef` set, as configured or else the
- * project's default branch, and the issue filter, with its status, label and setStatus names
+ * project's default branch, and the issue filter, with its status, label, excludeLabel and setStatus names
  * checked against the team. Worktrees need `baseRef`; `workspace: local` creates none, so it isn't looked up.
  */
 async function prepare(
