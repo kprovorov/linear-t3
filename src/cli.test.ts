@@ -1155,6 +1155,44 @@ describe("cli run against fake Linear and T3", () => {
       expect(linear.filters).toEqual([]);
       expect(t3.launches).toEqual([]);
     });
+
+    test.each([["run"], ["run", "--once"], ["run", "--dry-run"]])(
+      "%s with a label required on the CLI and excluded in the Global Config fails before the first poll, naming both sources",
+      async (...command) => {
+        const { linear, t3, dir, env, files } = await servers(
+          {},
+          { excludeLabel: ["windows-only", "MAC"] },
+          queue,
+          {},
+          { labels },
+        );
+        const result = await startCli({ cwd: dir, env }, [...command, "--label", "mac"]).result;
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain(
+          `"mac" is both required (label: --label) and excluded (excludeLabel: ${files.config})`,
+        );
+        expect(linear.filters).toEqual([]);
+        expect(t3.launches).toEqual([]);
+      },
+    );
+
+    test("labels both required and excluded within one layer fail before the first poll, naming each", async () => {
+      const { linear, t3, dir, env } = await servers(
+        {},
+        {},
+        queue,
+        { label: ["a", "Human", "mac"], excludeLabel: ["human", "mac"] },
+        { labels },
+      );
+      const local = join(dir, "linear-t3.config.json");
+      const result = await startCli({ cwd: dir, env }, ["run", "--once"]).result;
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        `"Human", "mac" are both required (label: ${local}) and excluded (excludeLabel: ${local})`,
+      );
+      expect(linear.filters).toEqual([]);
+      expect(t3.launches).toEqual([]);
+    });
   });
 
   describe("assignee and priority", () => {
@@ -2556,6 +2594,12 @@ function startAndInstalledChecks(service: (labels?: string[]) => Promise<Service
       case: "an invalid Global Config",
       breaks: (f) => writeFile(f.config!, JSON.stringify({ team: "ENG" })),
       fix: /Invalid config[\s\S]*team: only goes in a Local Config[\s\S]*fix it, then run `linear-t3 start` again/,
+    },
+    {
+      case: "a label both required and excluded",
+      breaks: (f) =>
+        writeFile(f.local!, JSON.stringify({ team: "ENG", label: "mac", excludeLabel: "Mac" })),
+      fix: /"mac" is both required \(label: .*\) and excluded \(excludeLabel: .*\)[\s\S]*fix it, then run `linear-t3 start` again/,
     },
     {
       case: "no Linear key",

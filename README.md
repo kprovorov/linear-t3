@@ -91,7 +91,7 @@ Each key resolves on its own, highest first:
 4. The T3 project's own setting, or T3's global setting, for keys T3 has one for.
 5. The built-in default.
 
-A key a layer doesn't set falls through to the next one. A list set in a higher layer replaces the lower one, so `--status Backlog` means exactly "status Backlog". `label` and `excludeLabel` are the exceptions: every layer's labels add up, so `"label": "mac"` in the Global Config, `"label": "ready-for-agent"` in the Local Config and `--label bug` watch issues that carry all three. Likewise `"excludeLabel": "windows-only"` in the Global Config and `--exclude-label wip` skip issues that carry either one; a one-off `--exclude-label` never drops the machine's exclusions. `--config` replaces the discovered Local Config; it doesn't add to it.
+A key a layer doesn't set falls through to the next one. A list set in a higher layer replaces the lower one, so `--status Backlog` means exactly "status Backlog". `label` and `excludeLabel` are the exceptions: every layer's labels add up, so `"label": "mac"` in the Global Config, `"label": "ready-for-agent"` in the Local Config and `--label bug` watch issues that carry all three. Likewise `"excludeLabel": "windows-only"` in the Global Config and `--exclude-label wip` skip issues that carry either one; a one-off `--exclude-label` never drops the machine's exclusions. A label can't be in both `label` and `excludeLabel`. `--config` replaces the discovered Local Config; it doesn't add to it.
 
 Booleans take `true` or `false`, and a bare flag means `true` (`--comment` is `--comment true`). List keys take a string or an array in a file, and a repeated flag on the CLI (`--status Todo --status Backlog`). `--filter` takes JSON.
 
@@ -190,7 +190,7 @@ What each one does:
 - **`t3Url`**: the T3 Code server.
 - **`stateFile`**: where State is kept, relative to the Global Config's folder. Every Daemon on the machine can share it: each write takes a lock (`<stateFile>.lock`) and merges its record into the file, and each Daemon rereads it every poll.
 
-Status, label, `excludeLabel` and `setStatus` names are checked against the team before the first poll, including the `In Progress` default, so a typo fails fast instead of matching nothing. An excluded label set in the Global Config must exist in every team you watch on the machine.
+Status, label, `excludeLabel` and `setStatus` names are checked against the team before the first poll, including the `In Progress` default, so a typo fails fast instead of matching nothing. An excluded label set in the Global Config must exist in every team you watch on the machine. A label can't be both required and excluded, even when the two keys come from different layers: such a run could never match anything, so it fails before the first poll and names the file or flag that set each key.
 
 ### Defaults from T3
 

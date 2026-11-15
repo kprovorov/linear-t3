@@ -567,13 +567,25 @@ export async function loadConfig(sources: ConfigSources): Promise<Config> {
     return value;
   };
 
+  const label = get("label");
+  const excludeLabel = get("excludeLabel");
+  // Such a run could never match anything.
+  const excluded = new Set(excludeLabel?.map((name) => name.toLowerCase()));
+  const clashes = (label ?? []).filter((name) => excluded.has(name.toLowerCase()));
+  if (clashes.length > 0) {
+    const names = clashes.map((name) => `"${name}"`).join(", ");
+    throw new ConfigError(
+      `${names} ${clashes.length === 1 ? "is" : "are"} both required (label: ${keySources.label}) and excluded (excludeLabel: ${keySources.excludeLabel})`,
+    );
+  }
+
   const stateFile = get("stateFile");
   return {
     project: projectIn(pick("project").layer, cwd),
     team: required("team"),
     status: get("status"),
-    label: get("label"),
-    excludeLabel: get("excludeLabel"),
+    label,
+    excludeLabel,
     assignee: get("assignee"),
     priority: get("priority"),
     filter: get("filter"),
